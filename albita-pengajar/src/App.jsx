@@ -138,17 +138,21 @@ export default function App() {
           setTeacherNotes(noteMap);
         }
 
-        // Fetch attendance records dari Supabase agar data tidak hilang saat refresh
+                // Fetch attendance records dari Supabase agar data tidak hilang saat refresh
         const { data: attRecs } = await supabase.from('attendance').select('*');
+        let attMap = {};
         if (attRecs) {
-          const attMap = {};
           attRecs.forEach(a => {
             if (!attMap[a.date_key]) attMap[a.date_key] = {};
             attMap[a.date_key][a.student_id] = a.status;
           });
-          setAttendanceRecords(attMap);
         }
+        
+        // Gabungkan dengan localStorage sebagai cadangan (Supabase tetap prioritas)
+        const localAtt = JSON.parse(localStorage.getItem('albita_attendance') || '{}');
+        setAttendanceRecords({ ...localAtt, ...attMap });
       } catch (err) {
+
         console.error('Gagal mengambil data Supabase:', err);
       }
     }
@@ -308,15 +312,19 @@ export default function App() {
     setAttendanceDirty({ ...attendanceDirty, [studentId]: true });
   };
 
-  const handleSaveAttendanceRow = async (student) => {
+    const handleSaveAttendanceRow = async (student) => {
     const chosenStatus = todayAttendanceDraft[student.id];
     if (!chosenStatus) return;
 
     const updatedToday = { ...(attendanceRecords[todayKey] || {}), [student.id]: chosenStatus };
-    setAttendanceRecords({ ...attendanceRecords, [todayKey]: updatedToday });
+    const newRecords = { ...attendanceRecords, [todayKey]: updatedToday };
+    setAttendanceRecords(newRecords);
     setAttendanceDirty({ ...attendanceDirty, [student.id]: false });
 
-    // Simpan ke Supabase agar tidak hilang saat refresh
+    // 1. Simpan ke LocalStorage agar instan dan tahan refresh
+    localStorage.setItem('albita_attendance', JSON.stringify(newRecords));
+
+    // 2. Simpan ke Supabase untuk sinkronisasi cloud
     if (supabase) {
       await supabase.from('attendance').upsert({
         date_key: todayKey,
@@ -324,15 +332,29 @@ export default function App() {
         status: chosenStatus
       }, { onConflict: 'date_key,student_id' });
     }
+  };
+
+  const handleSendAttendanceWA = (student) => {
+    const savedToday = attendanceRecords[todayKey]?.[student.id];
+    const draft = todayAttendanceDraft[student.id];
+    const status = draft || savedToday;
+
+    if (!status) {
+      alert("Pilih status absensi terlebih dahulu!");
+      return;
+    }
 
     if (student.whatsapp) {
       const waNumber = formatWaNumber(student.whatsapp);
       let msg = `${student.name} sudah tiba di tempat les Albita (${currentDayName}, ${currentDateNum} ${currentMonthName} ${currentYear}).`;
-      if (chosenStatus === 'Izin') msg = `${student.name} tercatat IZIN hari ini (${currentDayName}, ${currentDateNum} ${currentMonthName} ${currentYear}).`;
-      if (chosenStatus === 'Tidak Hadir') msg = `${student.name} tercatat TIDAK HADIR hari ini (${currentDayName}, ${currentDateNum} ${currentMonthName} ${currentYear}).`;
+      if (status === 'Izin') msg = `${student.name} tercatat IZIN hari ini (${currentDayName}, ${currentDateNum} ${currentMonthName} ${currentYear}).`;
+      if (status === 'Tidak Hadir') msg = `${student.name} tercatat TIDAK HADIR hari ini (${currentDayName}, ${currentDateNum} ${currentMonthName} ${currentYear}).`;
       window.open(`https://wa.me/${waNumber}?text=${encodeURIComponent(msg)}`, '_blank', 'noopener,noreferrer');
+    } else {
+      alert("Nomor WhatsApp orang tua tidak tersedia.");
     }
   };
+
 
   const filteredStudents = students.filter((s) =>
     s.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -1094,7 +1116,7 @@ export default function App() {
                       <p className="font-bold text-sm text-slate-900">{std.name} <span className="text-xs font-normal text-slate-500">({std.class})</span></p>
                       <p className="text-[11px] text-slate-500">Wali: {std.parentName}</p>
                     </div>
-                    <div className="flex flex-wrap items-center gap-2">
+                                        <div className="flex flex-wrap items-center gap-2">
                       {['Hadir', 'Izin', 'Tidak Hadir'].map((st) => (
                         <button
                           key={st}
@@ -1112,20 +1134,28 @@ export default function App() {
                           {st}
                         </button>
                       ))}
-                      <button
-                        onClick={() => handleSaveAttendanceRow(std)}
-                        disabled={!currentChoice}
-                        className={`px-3.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1 ${
-                          isDirty
-                            ? 'bg-indigo-600 text-white shadow-sm'
-                            : savedToday
-                            ? 'bg-slate-100 text-slate-600'
-                            : 'bg-slate-100 text-slate-400 cursor-not-allowed'
-                        }`}
-                      >
-                        <Save className="w-3.5 h-3.5" /> {savedToday && !isDirty ? 'Terkirim WA' : 'Simpan & WA'}
-                      </button>
+                      <div className="flex gap-1.5 ml-2">
+                        <button
+                          onClick={() => handleSaveAttendanceRow(std)}
+                          disabled={!isDirty}
+                          className={`px-3.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1 ${
+                            isDirty
+                              ? 'bg-indigo-600 text-white shadow-sm'
+                              : 'bg-slate-100 text-slate-400 cursor-not-allowed'
+                          }`}
+                        >
+                          <Save className="w-3.5 h-3.5" /> Simpan
+                        </button>
+                        <button
+                          onClick={() => handleSendAttendanceWA(std)}
+                          disabled={!currentChoice}
+                          className={`px-3.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1 bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100 disabled:opacity-50 disabled:cursor-not-allowed`}
+                        >
+                          <Phone className="w-3.5 h-3.5" /> WA
+                        </button>
+                      </div>
                     </div>
+
                   </div>
                 );
               })}
