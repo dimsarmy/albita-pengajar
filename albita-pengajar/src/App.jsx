@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { createClient } from '@supabase/supabase-js';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import {
   Camera,
@@ -26,6 +27,11 @@ import {
   Download
 } from 'lucide-react';
 
+// Koneksi Supabase dari Vercel Environment Variables
+const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || '';
+const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
+const supabase = (supabaseUrl && supabaseAnonKey) ? createClient(supabaseUrl, supabaseAnonKey) : null;
+
 const apiKey = import.meta.env.VITE_GEMINI_API_KEY || '';
 const genAI = apiKey ? new GoogleGenerativeAI(apiKey) : null;
 
@@ -39,51 +45,14 @@ const MONTHS_ID = [
   'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'
 ];
 
-const DAYS_ID = [
-  'Minggu', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu'
-];
+const DAYS_ID = ['Minggu', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu'];
 
 const formatWaNumber = (num) => {
   if (!num) return '';
   let clean = num.replace(/[^0-9]/g, '');
-  if (clean.startsWith('0')) {
-    clean = '62' + clean.slice(1);
-  }
+  if (clean.startsWith('0')) clean = '62' + clean.slice(1);
   return clean;
 };
-
-const DEFAULT_STUDENTS = [
-  {
-    id: 'std-1',
-    name: 'Azka',
-    class: '6 SD',
-    parentName: 'Ayah Azka',
-    whatsapp: '081234567890',
-    accessCode: 'ALBITA-AZKA'
-  },
-  {
-    id: 'std-2',
-    name: 'Aisa',
-    class: '5 SD',
-    parentName: 'Ibu Aisa',
-    whatsapp: '081298765432',
-    accessCode: 'ALBITA-AISA'
-  }
-];
-
-const DEFAULT_EXAMS = [
-  {
-    id: 'exam-1',
-    title: 'Soal Jadi - Paket A Matematika Kelas 6',
-    fileName: 'Soal_Jadi_MTK_6.docx',
-    uploadDate: '18 Nov 2026',
-    subject: 'Matematika',
-    questions: [
-      { no: 1, text: 'Hasil dari 3/4 + 0,25 dalam bentuk desimal adalah...', answerKey: '1,00 atau 1', topic: 'Pecahan' },
-      { no: 2, text: 'Ibu membeli 2,5 kg gula dan digunakan 1 1/4 kg untuk membuat kue. Sisa gula Ibu adalah...', answerKey: '1,25 kg', topic: 'Soal Cerita' }
-    ]
-  }
-];
 
 export default function App() {
   const urlParams = new URLSearchParams(window.location.search);
@@ -102,47 +71,70 @@ export default function App() {
   const currentYear = now.getFullYear();
   const todayKey = `${currentYear}-${String(currentMonthIdx + 1).padStart(2, '0')}-${String(currentDateNum).padStart(2, '0')}`;
   const currentMonthKey = `${currentYear}-${String(currentMonthIdx + 1).padStart(2, '0')}`;
-
   const isNearEndOfMonth = currentDateNum >= 25;
 
-  const [students, setStudents] = useState(() => {
-    const saved = localStorage.getItem('albita_students');
-    return saved ? JSON.parse(saved) : DEFAULT_STUDENTS;
-  });
+  const [students, setStudents] = useState([]);
+  const [exams, setExams] = useState([]);
+  const [submissions, setSubmissions] = useState([]);
+  const [attendanceRecords, setAttendanceRecords] = useState({});
+  const [payments, setPayments] = useState({});
+  const [teacherNotes, setTeacherNotes] = useState({});
 
-  const [exams, setExams] = useState(() => {
-    const saved = localStorage.getItem('albita_exams');
-    return saved ? JSON.parse(saved) : DEFAULT_EXAMS;
-  });
+  // Sinkronisasi data real-time dengan Supabase Cloud Database
+  useEffect(() => {
+    if (!supabase) return;
 
-  const [submissions, setSubmissions] = useState(() => {
-    const saved = localStorage.getItem('albita_submissions');
-    return saved ? JSON.parse(saved) : [];
-  });
+    async function fetchAllData() {
+      try {
+        const { data: stds } = await supabase.from('students').select('*');
+        if (stds) setStudents(stds.map(s => ({
+          id: s.id,
+          name: s.name,
+          class: s.class,
+          parentName: s.parent_name,
+          whatsapp: s.whatsapp,
+          accessCode: s.access_code,
+          paymentStatus: s.payment_status
+        })));
 
-  const [attendanceRecords, setAttendanceRecords] = useState(() => {
-    const saved = localStorage.getItem('albita_attendance');
-    return saved ? JSON.parse(saved) : {};
-  });
+        const { data: exms } = await supabase.from('exams').select('*');
+        if (exms) setExams(exms);
 
-  const [payments, setPayments] = useState(() => {
-    const saved = localStorage.getItem('albita_payments');
-    return saved ? JSON.parse(saved) : {
-      [currentMonthKey]: { 'std-1': 'Belum Lunas', 'std-2': 'Belum Lunas' }
-    };
-  });
+        const { data: subs } = await supabase.from('submissions').select('*');
+        if (subs) setSubmissions(subs.map(sub => ({
+          id: sub.id,
+          studentId: sub.student_id,
+          examId: sub.exam_id,
+          date: sub.date,
+          score: sub.score,
+          results: sub.results
+        })));
 
-  const [teacherNotes, setTeacherNotes] = useState(() => {
-    const saved = localStorage.getItem('albita_teacher_notes');
-    return saved ? JSON.parse(saved) : {};
-  });
+        const { data: pays } = await supabase.from('payments').select('*');
+        if (pays) {
+          const payMap = {};
+          pays.forEach(p => {
+            if (!payMap[p.month_key]) payMap[p.month_key] = {};
+            payMap[p.month_key][p.student_id] = p.status;
+          });
+          setPayments(payMap);
+        }
 
-  useEffect(() => { localStorage.setItem('albita_students', JSON.stringify(students)); }, [students]);
-  useEffect(() => { localStorage.setItem('albita_exams', JSON.stringify(exams)); }, [exams]);
-  useEffect(() => { localStorage.setItem('albita_submissions', JSON.stringify(submissions)); }, [submissions]);
-  useEffect(() => { localStorage.setItem('albita_attendance', JSON.stringify(attendanceRecords)); }, [attendanceRecords]);
-  useEffect(() => { localStorage.setItem('albita_payments', JSON.stringify(payments)); }, [payments]);
-  useEffect(() => { localStorage.setItem('albita_teacher_notes', JSON.stringify(teacherNotes)); }, [teacherNotes]);
+        const { data: notes } = await supabase.from('teacher_notes').select('*');
+        if (notes) {
+          const noteMap = {};
+          notes.forEach(n => {
+            noteMap[n.student_id] = { month: n.month, note: n.note };
+          });
+          setTeacherNotes(noteMap);
+        }
+      } catch (err) {
+        console.error('Gagal mengambil data Supabase:', err);
+      }
+    }
+
+    fetchAllData();
+  }, []);
 
   const [activeTab, setActiveTab] = useState('students');
   const [searchQuery, setSearchQuery] = useState('');
@@ -162,16 +154,14 @@ export default function App() {
   const [newStudentClass, setNewStudentClass] = useState('6 SD');
   const [newWhatsapp, setNewWhatsapp] = useState('');
 
-  // Bank Soal Modal View
   const [viewingExamModal, setViewingExamModal] = useState(null);
-
   const [isUploadingDoc, setIsUploadingDoc] = useState(false);
-  const [scanStudentId, setScanStudentId] = useState(students[0]?.id || 'std-1');
-  const [scanExamId, setScanExamId] = useState(exams[0]?.id || 'exam-1');
+  const [scanStudentId, setScanStudentId] = useState('');
+  const [scanExamId, setScanExamId] = useState('');
   const [isScanning, setIsScanning] = useState(false);
   const [lastScanResult, setLastScanResult] = useState(null);
 
-  const [todayAttendanceDraft, setTodayAttendanceDraft] = useState(() => attendanceRecords[todayKey] || {});
+  const [todayAttendanceDraft, setTodayAttendanceDraft] = useState({});
   const [attendanceDirty, setAttendanceDirty] = useState({});
   const [selectedCalDate, setSelectedCalDate] = useState(null);
 
@@ -182,7 +172,6 @@ export default function App() {
   const [noteDrafts, setNoteDrafts] = useState({});
   const [noteSavedAlert, setNoteSavedAlert] = useState({});
 
-  // Tab View Soal Khusus
   if (viewStudentParam) {
     const targetStudent = students.find((s) => s.id === viewStudentParam);
     const studentSubs = submissions.filter((sub) => sub.studentId === viewStudentParam);
@@ -234,15 +223,21 @@ export default function App() {
   const hasUnpaidThisMonth = students.some((s) => (currentMonthPayments[s.id] || 'Belum Lunas') !== 'Lunas');
   const showPaymentBadgeAlert = isNearEndOfMonth && hasUnpaidThisMonth;
 
-  const handleTogglePaymentStatus = (student, monthKeyToUpdate = currentMonthKey) => {
+  const handleTogglePaymentStatus = async (student, monthKeyToUpdate = currentMonthKey) => {
     const monthRecord = payments[monthKeyToUpdate] || {};
     const currentStatus = monthRecord[student.id] || 'Belum Lunas';
     const nextStatus = currentStatus === 'Lunas' ? 'Belum Lunas' : 'Lunas';
 
-    setPayments({
-      ...payments,
-      [monthKeyToUpdate]: { ...monthRecord, [student.id]: nextStatus }
-    });
+    const updatedMonthRec = { ...monthRecord, [student.id]: nextStatus };
+    setPayments({ ...payments, [monthKeyToUpdate]: updatedMonthRec });
+
+    if (supabase) {
+      await supabase.from('payments').upsert({
+        month_key: monthKeyToUpdate,
+        student_id: student.id,
+        status: nextStatus
+      });
+    }
 
     if (nextStatus === 'Lunas' && student.whatsapp) {
       const monthLabel = MONTHS_ID[parseInt(monthKeyToUpdate.split('-')[1], 10) - 1] || currentMonthName;
@@ -263,7 +258,7 @@ export default function App() {
 
     const updatedToday = { ...(attendanceRecords[todayKey] || {}), [student.id]: chosenStatus };
     setAttendanceRecords({ ...attendanceRecords, [todayKey]: updatedToday });
-    setAttendanceDirty({ ...attendanceDirty, [studentId]: false });
+    setAttendanceDirty({ ...attendanceDirty, [student.id]: false });
 
     if (student.whatsapp) {
       const waNumber = formatWaNumber(student.whatsapp);
@@ -315,27 +310,41 @@ export default function App() {
     setRenameModalStudent(null);
   };
 
-  const handleSaveStudentCard = (stdId) => {
+  const handleSaveStudentCard = async (stdId) => {
     const editData = studentEdits[stdId];
     if (!editData) return;
-    setStudents(
-      students.map((s) =>
-        s.id === stdId
-          ? { ...s, name: editData.name, parentName: editData.parentName, class: editData.class, whatsapp: editData.whatsapp }
-          : s
-      )
+
+    const updatedList = students.map((s) =>
+      s.id === stdId
+        ? { ...s, name: editData.name, parentName: editData.parentName, class: editData.class, whatsapp: editData.whatsapp }
+        : s
     );
+    setStudents(updatedList);
     setStudentEdits({ ...studentEdits, [stdId]: { ...editData, isDirty: false } });
+
+    if (supabase) {
+      await supabase.from('students').update({
+        name: editData.name,
+        class: editData.class,
+        parent_name: editData.parentName,
+        whatsapp: editData.whatsapp
+      }).eq('id', stdId);
+    }
   };
 
-  const handleDeleteStudent = (student) => {
+  const handleDeleteStudent = async (student) => {
     setOpenMenuId(null);
     if (!window.confirm(`Hapus permanen "${student.name}"?`)) return;
+
     setStudents(students.filter((s) => s.id !== student.id));
     setSubmissions(submissions.filter((sub) => sub.studentId !== student.id));
+
+    if (supabase) {
+      await supabase.from('students').delete().eq('id', student.id);
+    }
   };
 
-  const handleAddStudent = (e) => {
+  const handleAddStudent = async (e) => {
     e.preventDefault();
     if (!newStudentName.trim()) return;
     const firstName = newStudentName.trim().split(' ')[0].toUpperCase();
@@ -345,40 +354,67 @@ export default function App() {
       class: newStudentClass,
       parentName: newParentName.trim() || 'Wali Murid',
       whatsapp: newWhatsapp.trim(),
-      accessCode: `ALBITA-${firstName}`
+      accessCode: `ALBITA-${firstName}`,
+      paymentStatus: 'Belum Lunas'
     };
+
     setStudents([...students, newStd]);
     setNewStudentName('');
     setNewParentName('');
     setNewWhatsapp('');
     setShowAddStudent(false);
+
+    if (supabase) {
+      await supabase.from('students').insert({
+        id: newStd.id,
+        name: newStd.name,
+        class: newStd.class,
+        parent_name: newStd.parentName,
+        whatsapp: newStd.whatsapp,
+        access_code: newStd.accessCode,
+        payment_status: newStd.paymentStatus
+      });
+    }
   };
 
-  const handleUploadTeacherExam = (fileName) => {
+  const handleUploadTeacherExam = async (fileName) => {
     setIsUploadingDoc(true);
-    setTimeout(() => {
-      const newExam = {
-        id: `exam-${Date.now()}`,
-        title: fileName ? fileName.replace(/\.(doc|docx|pdf|jpg|png)$/i, '').replace(/_/g, ' ') : 'Soal Jadi Pengajar',
-        fileName: fileName || 'Soal_Baru.docx',
-        uploadDate: `${currentDateNum} ${currentMonthName.slice(0, 3)} ${currentYear}`,
-        subject: 'Bank Soal Guru',
-        questions: [
-          { no: 1, text: 'Contoh butir pertanyaan soal jadi pengajar...', answerKey: 'Kunci Jawaban', topic: 'Materi' }
-        ]
-      };
-      setExams([newExam, ...exams]);
-      setIsUploadingDoc(false);
-    }, 600);
+    const newExam = {
+      id: `exam-${Date.now()}`,
+      title: fileName ? fileName.replace(/\.(doc|docx|pdf|jpg|png)$/i, '').replace(/_/g, ' ') : 'Soal Jadi Pengajar',
+      fileName: fileName || 'Soal_Baru.docx',
+      uploadDate: `${currentDateNum} ${currentMonthName.slice(0, 3)} ${currentYear}`,
+      subject: 'Bank Soal Guru',
+      questions: [
+        { no: 1, text: 'Contoh butir pertanyaan soal jadi pengajar...', answerKey: 'Kunci Jawaban', topic: 'Materi' }
+      ]
+    };
+
+    setExams([newExam, ...exams]);
+    setIsUploadingDoc(false);
+
+    if (supabase) {
+      await supabase.from('exams').insert({
+        id: newExam.id,
+        title: newExam.title,
+        file_name: newExam.fileName,
+        upload_date: newExam.uploadDate,
+        subject: newExam.subject,
+        questions: newExam.questions
+      });
+    }
   };
 
-  const handleDeleteExam = (examId) => {
+  const handleDeleteExam = async (examId) => {
     if (!window.confirm('Hapus paket soal ini dari Bank Soal?')) return;
     setExams(exams.filter((e) => e.id !== examId));
+    if (supabase) {
+      await supabase.from('exams').delete().eq('id', examId);
+    }
   };
 
   const handleDownloadExam = (exam) => {
-    const content = `=== SOAL ALBITA ===\nJudul: ${exam.title}\nTanggal: ${exam.uploadDate}\nFile: ${exam.fileName}\n\nButir Soal:\n` +
+    const content = `=== SOAL ALBITA ===\nJudul: ${exam.title}\nTanggal: ${exam.uploadDate}\n\nButir Soal:\n` +
       exam.questions.map((q) => `${q.no}. ${q.text} (Kunci: ${q.answerKey})`).join('\n');
     const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
     const url = URL.createObjectURL(blob);
@@ -389,12 +425,12 @@ export default function App() {
     URL.revokeObjectURL(url);
   };
 
-  const handleScanPhoto = () => {
+  const handleScanPhoto = async () => {
     setIsScanning(true);
     setLastScanResult(null);
     const targetExam = exams.find((e) => e.id === scanExamId) || exams[0];
 
-    setTimeout(() => {
+    setTimeout(async () => {
       const generatedResults = targetExam.questions.map((q, idx) => ({
         no: q.no,
         status: idx === 1 ? 'wrong' : 'correct',
@@ -420,6 +456,17 @@ export default function App() {
         submission: newSub
       });
       setIsScanning(false);
+
+      if (supabase) {
+        await supabase.from('submissions').insert({
+          id: newSub.id,
+          student_id: newSub.studentId,
+          exam_id: newSub.examId,
+          date: newSub.date,
+          score: newSub.score,
+          results: newSub.results
+        });
+      }
     }, 700);
   };
 
@@ -530,7 +577,7 @@ export default function App() {
                   <Lock className="w-3 h-3" /> Ruang Pengajar
                 </span>
               </div>
-              <p className="text-xs text-indigo-300">Manajemen Siswa</p>
+              <p className="text-xs text-indigo-300">Manajemen Siswa (Supabase Cloud Sync)</p>
             </div>
           </div>
         </div>
@@ -562,7 +609,6 @@ export default function App() {
           </button>
         </div>
 
-        {/* TAB SISWA */}
         {activeTab === 'students' && (
           <div className="space-y-5">
             <div className="flex flex-wrap justify-between items-center gap-3">
@@ -630,27 +676,16 @@ export default function App() {
           </div>
         )}
 
-        {/* ================================================================= */}
-        {/* TAB 2: BANK SOAL (DENGAN VIEW, DOWNLOAD, DAN DELETE)              */}
-        {/* ================================================================= */}
         {activeTab === 'exams' && (
           <div className="space-y-4">
             <div className="bg-white rounded-2xl border p-6 flex flex-wrap justify-between items-center gap-4 shadow-sm">
               <div>
                 <h2 className="font-bold text-lg text-slate-900">Bank Soal Guru (Soal Jadi / Materi)</h2>
-                <p className="text-xs text-slate-500">Upload, lihat, unduh, atau hapus soal referensi buatanmu.</p>
+                <p className="text-xs text-slate-500">Upload dokumen soal atau foto soal jadi buatanmu sendiri.</p>
               </div>
               <label className="cursor-pointer px-4 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-sm font-semibold flex items-center gap-2 shadow-sm">
                 <Upload className="w-4 h-4" /> {isUploadingDoc ? 'Mengupload...' : 'Upload Document / Foto Soal'}
-                <input
-                  type="file"
-                  accept=".doc,.docx,.pdf,image/*"
-                  className="hidden"
-                  onChange={(e) => {
-                    const f = e.target.files?.[0];
-                    if (f) handleUploadTeacherExam(f.name);
-                  }}
-                />
+                <input type="file" accept=".doc,.docx,.pdf,image/*" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) handleUploadTeacherExam(f.name); }} />
               </label>
             </div>
 
@@ -658,29 +693,18 @@ export default function App() {
               {exams.map((ex) => (
                 <div key={ex.id} className="bg-white rounded-2xl border p-4 shadow-sm flex flex-wrap items-center justify-between gap-3">
                   <div>
-                    <span className="text-[11px] font-bold text-indigo-600">{ex.subject} • {ex.uploadDate}</span>
+                    <span className="text-[11px] font-bold text-indigo-600">{ex.subject} • {ex.upload_date || ex.uploadDate}</span>
                     <h3 className="font-bold text-sm text-slate-900">{ex.title}</h3>
-                    <p className="text-xs text-slate-400">File: {ex.fileName} ({ex.questions.length} Butir Soal)</p>
+                    <p className="text-xs text-slate-400">File: {ex.file_name || ex.fileName}</p>
                   </div>
-
-                  {/* Tombol Aksi: View, Download, Delete */}
                   <div className="flex items-center gap-2">
-                    <button
-                      onClick={() => setViewingExamModal(ex)}
-                      className="px-3 py-1.5 rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-xs font-bold flex items-center gap-1 transition-colors"
-                    >
+                    <button onClick={() => setViewingExamModal(ex)} className="px-3 py-1.5 rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-xs font-bold flex items-center gap-1">
                       <Eye className="w-3.5 h-3.5" /> View
                     </button>
-                    <button
-                      onClick={() => handleDownloadExam(ex)}
-                      className="px-3 py-1.5 rounded-xl bg-emerald-50 hover:bg-emerald-100 text-emerald-700 text-xs font-bold flex items-center gap-1 transition-colors"
-                    >
+                    <button onClick={() => handleDownloadExam(ex)} className="px-3 py-1.5 rounded-xl bg-emerald-50 hover:bg-emerald-100 text-emerald-700 text-xs font-bold flex items-center gap-1">
                       <Download className="w-3.5 h-3.5" /> Download
                     </button>
-                    <button
-                      onClick={() => handleDeleteExam(ex.id)}
-                      className="px-3 py-1.5 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-700 text-xs font-bold flex items-center gap-1 transition-colors"
-                    >
+                    <button onClick={() => handleDeleteExam(ex.id)} className="px-3 py-1.5 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-700 text-xs font-bold flex items-center gap-1">
                       <Trash2 className="w-3.5 h-3.5" /> Delete
                     </button>
                   </div>
@@ -690,7 +714,6 @@ export default function App() {
           </div>
         )}
 
-        {/* TAB SCAN KOREKSI */}
         {activeTab === 'scanner' && (
           <div className="grid lg:grid-cols-12 gap-6">
             <div className="lg:col-span-5 bg-white rounded-2xl border p-5 space-y-4 shadow-sm h-fit">
@@ -745,7 +768,6 @@ export default function App() {
           </div>
         )}
 
-        {/* TAB ABSENSI */}
         {activeTab === 'attendance' && (
           <div className="space-y-5">
             <div className="bg-indigo-900 text-white p-5 rounded-2xl shadow-sm flex flex-wrap items-center justify-between gap-3">
@@ -806,7 +828,6 @@ export default function App() {
           </div>
         )}
 
-        {/* TAB KALENDER */}
         {activeTab === 'calendar' && (
           <div className="space-y-5">
             <div className="bg-white p-5 rounded-2xl border shadow-sm">
@@ -858,7 +879,6 @@ export default function App() {
           </div>
         )}
 
-        {/* TAB STATUS PEMBAYARAN */}
         {activeTab === 'payments' && (
           <div className="space-y-6">
             <div className="bg-white rounded-2xl border p-5 shadow-sm space-y-4">
@@ -985,7 +1005,6 @@ export default function App() {
           </div>
         )}
 
-        {/* TAB CATATAN GURU */}
         {activeTab === 'notes' && (
           <div className="space-y-4">
             <div>
@@ -1018,10 +1037,18 @@ export default function App() {
                       className="flex-1 px-3.5 py-2 rounded-xl border text-xs"
                     />
                     <button
-                      onClick={() => {
+                      onClick={async () => {
                         setTeacherNotes({ ...teacherNotes, [std.id]: draft });
                         setNoteSavedAlert({ ...noteSavedAlert, [std.id]: true });
                         setTimeout(() => setNoteSavedAlert((prev) => ({ ...prev, [std.id]: false })), 2000);
+
+                        if (supabase) {
+                          await supabase.from('teacher_notes').upsert({
+                            student_id: std.id,
+                            month: draft.month,
+                            note: draft.note
+                          });
+                        }
                       }}
                       className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 shrink-0"
                     >
@@ -1035,15 +1062,14 @@ export default function App() {
         )}
       </div>
 
-      {/* MODAL VIEW SOAL DI BANK SOAL */}
       {viewingExamModal && (
         <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-xs z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl max-w-2xl w-full max-h-[85vh] overflow-y-auto p-6 shadow-xl space-y-4">
             <div className="flex items-start justify-between gap-3 border-b pb-3">
               <div>
-                <span className="text-xs font-bold text-indigo-700">{viewingExamModal.subject} • {viewingExamModal.uploadDate}</span>
+                <span className="text-xs font-bold text-indigo-700">{viewingExamModal.subject} • {viewingExamModal.upload_date || viewingExamModal.uploadDate}</span>
                 <h3 className="font-bold text-lg text-slate-900">{viewingExamModal.title}</h3>
-                <p className="text-xs text-slate-400">File: {viewingExamModal.fileName}</p>
+                <p className="text-xs text-slate-400">File: {viewingExamModal.file_name || viewingExamModal.fileName}</p>
               </div>
               <button onClick={() => setViewingExamModal(null)} className="p-1 rounded-lg text-slate-400 hover:bg-slate-100"><X className="w-5 h-5" /></button>
             </div>
@@ -1056,14 +1082,10 @@ export default function App() {
                 </div>
               ))}
             </div>
-            <div className="flex justify-end pt-2">
-              <button onClick={() => setViewingExamModal(null)} className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-xs font-bold rounded-xl">Tutup</button>
-            </div>
           </div>
         </div>
       )}
 
-      {/* MODAL RENAME */}
       {renameModalStudent && (
         <div className="fixed inset-0 bg-slate-900/50 flex items-center justify-center p-4 z-50">
           <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-xl space-y-4">
