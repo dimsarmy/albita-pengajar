@@ -24,7 +24,8 @@ import {
   ChevronLeft,
   ChevronRight,
   CheckCircle2,
-  Download
+  Download,
+  Clock
 } from 'lucide-react';
 
 // Koneksi Supabase dari Vercel Environment Variables
@@ -98,7 +99,11 @@ export default function App() {
         })));
 
         const { data: exms } = await supabase.from('exams').select('*');
-        if (exms) setExams(exms);
+        if (exms) setExams(exms.map(e => ({
+          ...e,
+          fileName: e.file_name || e.fileName,
+          uploadDate: e.upload_date || e.uploadDate
+        })));
 
         const { data: subs } = await supabase.from('submissions').select('*');
         if (subs) setSubmissions(subs.map(sub => ({
@@ -154,8 +159,14 @@ export default function App() {
   const [newStudentClass, setNewStudentClass] = useState('6 SD');
   const [newWhatsapp, setNewWhatsapp] = useState('');
 
+  // State Bank Soal (Pengajar bisa Edit & View)
   const [viewingExamModal, setViewingExamModal] = useState(null);
+  const [editingExamModal, setEditingExamModal] = useState(null);
+  const [editExamTitle, setEditExamTitle] = useState('');
+  const [editExamSubject, setEditExamSubject] = useState('');
+  const [editExamQuestions, setEditExamQuestions] = useState([]);
   const [isUploadingDoc, setIsUploadingDoc] = useState(false);
+
   const [scanStudentId, setScanStudentId] = useState('');
   const [scanExamId, setScanExamId] = useState('');
   const [isScanning, setIsScanning] = useState(false);
@@ -172,6 +183,7 @@ export default function App() {
   const [noteDrafts, setNoteDrafts] = useState({});
   const [noteSavedAlert, setNoteSavedAlert] = useState({});
 
+  // MODE VIEW-ONLY UNTUK ORANG TUA (LINK ARSIP SOAL)
   if (viewStudentParam) {
     const targetStudent = students.find((s) => s.id === viewStudentParam);
     const studentSubs = submissions.filter((sub) => sub.studentId === viewStudentParam);
@@ -181,11 +193,11 @@ export default function App() {
         <header className="bg-indigo-950 text-white py-4 px-4 shadow-sm sticky top-0 z-20">
           <div className="max-w-3xl mx-auto flex items-center justify-between">
             <div>
-              <span className="text-[11px] uppercase tracking-wider text-indigo-300 font-semibold">Arsip Soal Dikerjakan</span>
+              <span className="text-[11px] uppercase tracking-wider text-indigo-300 font-semibold">Arsip Soal & Hasil Scan</span>
               <h1 className="font-bold text-lg">{targetStudent?.name} ({targetStudent?.class})</h1>
             </div>
-            <span className="px-3 py-1 rounded-full bg-indigo-800 text-xs font-semibold flex items-center gap-1.5">
-              <Eye className="w-3.5 h-3.5" /> Lihat Saja
+            <span className="px-3 py-1 rounded-full bg-indigo-800 text-xs font-semibold flex items-center gap-1.5 border border-indigo-700">
+              <Eye className="w-3.5 h-3.5" /> View Only (Orang Tua)
             </span>
           </div>
         </header>
@@ -193,7 +205,7 @@ export default function App() {
         <main className="max-w-3xl mx-auto px-4 py-6 space-y-5">
           {studentSubs.length === 0 ? (
             <div className="bg-white rounded-2xl border p-8 text-center text-xs text-slate-500">
-              Belum ada soal yang dikerjakan.
+              Belum ada soal atau hasil scan yang dikerjakan.
             </div>
           ) : (
             studentSubs.map((sub) => {
@@ -201,14 +213,43 @@ export default function App() {
               if (!examDetail) return null;
               return (
                 <div key={sub.id} className="bg-white rounded-2xl border p-5 shadow-sm space-y-3">
-                  <div className="flex justify-between items-start border-b pb-3">
-                    <div>
-                      <span className="text-xs font-bold text-indigo-700">{examDetail.subject} • {sub.date}</span>
+                  <div className="flex flex-wrap justify-between items-start gap-2 border-b pb-3">
+                    <div className="space-y-1">
+                      <span className="text-xs font-bold text-indigo-700">{examDetail.subject}</span>
                       <h2 className="font-bold text-base text-slate-900">{examDetail.title}</h2>
+                      <div className="flex flex-wrap items-center gap-3 text-[11px] text-slate-500">
+                        <span className="flex items-center gap-1">
+                          <Upload className="w-3 h-3 text-indigo-500" /> Soal Diupload: <strong>{examDetail.uploadDate || '-'}</strong>
+                        </span>
+                        <span className="flex items-center gap-1">
+                          <Camera className="w-3 h-3 text-emerald-600" /> Hasil Scan: <strong>{sub.date || '-'}</strong>
+                        </span>
+                      </div>
                     </div>
-                    <span className="px-3 py-1 rounded-xl bg-indigo-50 border text-indigo-800 font-bold text-xs">
+                    <span className="px-3 py-1.5 rounded-xl bg-indigo-50 border border-indigo-100 text-indigo-800 font-bold text-xs">
                       Skor: {sub.score}
                     </span>
+                  </div>
+
+                  {/* Detail Butir Soal (Read-Only) */}
+                  <div className="space-y-2 pt-1">
+                    {(examDetail.questions || []).map((q, i) => {
+                      const res = (sub.results || []).find((r) => r.no === q.no);
+                      return (
+                        <div key={i} className="p-3 rounded-xl bg-slate-50 border border-slate-100 text-xs flex justify-between items-start gap-2">
+                          <div>
+                            <span className="font-bold text-slate-700 mr-1.5">{q.no}.</span>
+                            <span className="text-slate-800">{q.text}</span>
+                            {res?.inkNote && <p className="text-[11px] text-slate-500 mt-1 italic">Catatan: {res.inkNote}</p>}
+                          </div>
+                          {res && (
+                            <span className={`px-2 py-0.5 rounded font-bold text-[10px] shrink-0 ${res.status === 'correct' ? 'bg-emerald-100 text-emerald-800' : 'bg-rose-100 text-rose-800'}`}>
+                              {res.status === 'correct' ? 'Benar' : 'Perlu Latihan'}
+                            </span>
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
               );
@@ -377,13 +418,17 @@ export default function App() {
     }
   };
 
+  // UPLOAD DOKUMEN BANK SOAL + REKAM TANGGAL UPLOAD OTOMATIS
   const handleUploadTeacherExam = async (fileName) => {
     setIsUploadingDoc(true);
+    const timeStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+    const fullUploadDate = `${currentDateNum} ${currentMonthName} ${currentYear} (${timeStr})`;
+
     const newExam = {
       id: `exam-${Date.now()}`,
       title: fileName ? fileName.replace(/\.(doc|docx|pdf|jpg|png)$/i, '').replace(/_/g, ' ') : 'Soal Jadi Pengajar',
       fileName: fileName || 'Soal_Baru.docx',
-      uploadDate: `${currentDateNum} ${currentMonthName.slice(0, 3)} ${currentYear}`,
+      uploadDate: fullUploadDate,
       subject: 'Bank Soal Guru',
       questions: [
         { no: 1, text: 'Contoh butir pertanyaan soal jadi pengajar...', answerKey: 'Kunci Jawaban', topic: 'Materi' }
@@ -405,6 +450,55 @@ export default function App() {
     }
   };
 
+  // FITUR EDIT BANK SOAL KHUSUS PENGAJAR
+  const handleOpenEditExam = (exam) => {
+    setEditingExamModal(exam);
+    setEditExamTitle(exam.title || '');
+    setEditExamSubject(exam.subject || 'Bank Soal Guru');
+    setEditExamQuestions(exam.questions ? [...exam.questions] : []);
+  };
+
+  const handleUpdateQuestionField = (idx, field, value) => {
+    const updated = [...editExamQuestions];
+    updated[idx] = { ...updated[idx], [field]: value };
+    setEditExamQuestions(updated);
+  };
+
+  const handleAddQuestionRow = () => {
+    setEditExamQuestions([
+      ...editExamQuestions,
+      { no: editExamQuestions.length + 1, text: '', answerKey: '', topic: 'Materi' }
+    ]);
+  };
+
+  const handleRemoveQuestionRow = (idx) => {
+    const filtered = editExamQuestions.filter((_, i) => i !== idx).map((q, i) => ({ ...q, no: i + 1 }));
+    setEditExamQuestions(filtered);
+  };
+
+  const handleSaveEditedExam = async (e) => {
+    e.preventDefault();
+    if (!editingExamModal) return;
+
+    const updatedExam = {
+      ...editingExamModal,
+      title: editExamTitle.trim() || editingExamModal.title,
+      subject: editExamSubject.trim() || editingExamModal.subject,
+      questions: editExamQuestions
+    };
+
+    setExams(exams.map((ex) => (ex.id === updatedExam.id ? updatedExam : ex)));
+    setEditingExamModal(null);
+
+    if (supabase) {
+      await supabase.from('exams').update({
+        title: updatedExam.title,
+        subject: updatedExam.subject,
+        questions: updatedExam.questions
+      }).eq('id', updatedExam.id);
+    }
+  };
+
   const handleDeleteExam = async (examId) => {
     if (!window.confirm('Hapus paket soal ini dari Bank Soal?')) return;
     setExams(exams.filter((e) => e.id !== examId));
@@ -414,8 +508,8 @@ export default function App() {
   };
 
   const handleDownloadExam = (exam) => {
-    const content = `=== SOAL ALBITA ===\nJudul: ${exam.title}\nTanggal: ${exam.uploadDate}\n\nButir Soal:\n` +
-      exam.questions.map((q) => `${q.no}. ${q.text} (Kunci: ${q.answerKey})`).join('\n');
+    const content = `=== SOAL ALBITA ===\nJudul: ${exam.title}\nTanggal Upload: ${exam.uploadDate}\n\nButir Soal:\n` +
+      (exam.questions || []).map((q) => `${q.no}. ${q.text} (Kunci: ${q.answerKey})`).join('\n');
     const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
@@ -425,26 +519,37 @@ export default function App() {
     URL.revokeObjectURL(url);
   };
 
+  // SCAN LEMBAR KERJA + TANGGAL SCAN OTOMATIS
   const handleScanPhoto = async () => {
+    if (!scanStudentId) {
+      alert('Pilih siswa terlebih dahulu!');
+      return;
+    }
     setIsScanning(true);
     setLastScanResult(null);
     const targetExam = exams.find((e) => e.id === scanExamId) || exams[0];
+    if (!targetExam) {
+      alert('Belum ada paket soal di Bank Soal. Upload soal terlebih dahulu.');
+      setIsScanning(false);
+      return;
+    }
 
     setTimeout(async () => {
-      const generatedResults = targetExam.questions.map((q, idx) => ({
+      const generatedResults = (targetExam.questions || []).map((q, idx) => ({
         no: q.no,
         status: idx === 1 ? 'wrong' : 'correct',
         inkNote: idx === 1 ? 'Perlu koreksi ulang' : 'Jawaban benar'
       }));
 
       const correctCount = generatedResults.filter((r) => r.status === 'correct').length;
-      const calcScore = Math.round((correctCount / targetExam.questions.length) * 100);
+      const calcScore = generatedResults.length > 0 ? Math.round((correctCount / generatedResults.length) * 100) : 100;
+      const timeStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
 
       const newSub = {
         id: `sub-${Date.now()}`,
         studentId: scanStudentId,
         examId: targetExam.id,
-        date: `${currentDateNum} ${currentMonthName.slice(0, 3)} ${currentYear}`,
+        date: `${currentDateNum} ${currentMonthName} ${currentYear} (${timeStr})`,
         score: calcScore,
         results: generatedResults
       };
@@ -468,6 +573,24 @@ export default function App() {
         });
       }
     }, 700);
+  };
+
+  const handleSaveTeacherNote = async (studentId) => {
+    const text = noteDrafts[studentId] !== undefined ? noteDrafts[studentId] : (teacherNotes[studentId]?.note || '');
+    setTeacherNotes({
+      ...teacherNotes,
+      [studentId]: { month: currentMonthName, note: text }
+    });
+    setNoteSavedAlert({ ...noteSavedAlert, [studentId]: true });
+    setTimeout(() => setNoteSavedAlert((prev) => ({ ...prev, [studentId]: false })), 2500);
+
+    if (supabase) {
+      await supabase.from('teacher_notes').upsert({
+        student_id: studentId,
+        month: currentMonthName,
+        note: text
+      });
+    }
   };
 
   const daysInCurrentMonth = new Date(currentYear, currentMonthIdx + 1, 0).getDate();
@@ -609,6 +732,7 @@ export default function App() {
           </button>
         </div>
 
+        {/* TAB 1: SISWA */}
         {activeTab === 'students' && (
           <div className="space-y-5">
             <div className="flex flex-wrap justify-between items-center gap-3">
@@ -676,149 +800,198 @@ export default function App() {
           </div>
         )}
 
+        {/* TAB 2: BANK SOAL (TANGGAL UPLOAD + PENGELOLAAN PENUH PENGAJAR) */}
         {activeTab === 'exams' && (
           <div className="space-y-4">
             <div className="bg-white rounded-2xl border p-6 flex flex-wrap justify-between items-center gap-4 shadow-sm">
               <div>
                 <h2 className="font-bold text-lg text-slate-900">Bank Soal Guru (Soal Jadi / Materi)</h2>
-                <p className="text-xs text-slate-500">Upload dokumen soal atau foto soal jadi buatanmu sendiri.</p>
+                <p className="text-xs text-slate-500 mt-0.5">Upload dokumen soal — tanggal unggah dicatat otomatis dan pengajar dapat mengedit butir soal kapan saja.</p>
               </div>
-              <label className="cursor-pointer px-4 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-sm font-semibold flex items-center gap-2 shadow-sm">
-                <Upload className="w-4 h-4" /> {isUploadingDoc ? 'Mengupload...' : 'Upload Document / Foto Soal'}
-                <input type="file" accept=".doc,.docx,.pdf,image/*" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) handleUploadTeacherExam(f.name); }} />
+              <label className="px-4 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold flex items-center gap-2 cursor-pointer shadow-sm">
+                <Upload className="w-4 h-4" /> {isUploadingDoc ? 'Mengunggah...' : 'Upload Dokumen Soal'}
+                <input
+                  type="file"
+                  accept=".doc,.docx,.pdf,.jpg,.png,.txt"
+                  className="hidden"
+                  onChange={(e) => {
+                    if (e.target.files && e.target.files[0]) {
+                      handleUploadTeacherExam(e.target.files[0].name);
+                      e.target.value = '';
+                    }
+                  }}
+                />
               </label>
             </div>
 
-            <div className="space-y-3">
-              {exams.map((ex) => (
-                <div key={ex.id} className="bg-white rounded-2xl border p-4 shadow-sm flex flex-wrap items-center justify-between gap-3">
-                  <div>
-                    <span className="text-[11px] font-bold text-indigo-600">{ex.subject} • {ex.upload_date || ex.uploadDate}</span>
-                    <h3 className="font-bold text-sm text-slate-900">{ex.title}</h3>
-                    <p className="text-xs text-slate-400">File: {ex.file_name || ex.fileName}</p>
+            {exams.length === 0 ? (
+              <div className="bg-white rounded-2xl border p-10 text-center text-xs text-slate-400">
+                Belum ada dokumen soal yang di-upload. Klik tombol "Upload Dokumen Soal" di atas.
+              </div>
+            ) : (
+              <div className="grid md:grid-cols-2 gap-4">
+                {exams.map((ex) => (
+                  <div key={ex.id} className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm flex flex-col justify-between gap-4">
+                    <div className="space-y-2">
+                      <div className="flex items-start justify-between gap-2">
+                        <div>
+                          <span className="text-[11px] font-bold text-indigo-700 bg-indigo-50 px-2 py-0.5 rounded border border-indigo-100">
+                            {ex.subject || 'Bank Soal'}
+                          </span>
+                          <h3 className="font-bold text-base text-slate-900 mt-1.5">{ex.title}</h3>
+                        </div>
+                        <button onClick={() => handleDeleteExam(ex.id)} className="p-1.5 text-rose-500 hover:bg-rose-50 rounded-lg" title="Hapus Soal">
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-3 text-xs text-slate-500 bg-slate-50 px-3 py-2 rounded-xl border">
+                        <span className="flex items-center gap-1.5">
+                          <Clock className="w-3.5 h-3.5 text-indigo-600" /> Diupload: <strong className="text-slate-700">{ex.uploadDate || 'Baru saja'}</strong>
+                        </span>
+                        <span>•</span>
+                        <span>{(ex.questions || []).length} Butir Soal</span>
+                      </div>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2 pt-2 border-t">
+                      <button onClick={() => setViewingExamModal(ex)} className="flex-1 py-2 px-3 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5">
+                        <Eye className="w-3.5 h-3.5" /> Lihat
+                      </button>
+                      <button onClick={() => handleOpenEditExam(ex)} className="flex-1 py-2 px-3 bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5">
+                        <Edit3 className="w-3.5 h-3.5" /> Edit Soal
+                      </button>
+                      <button onClick={() => handleDownloadExam(ex)} className="py-2 px-3 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5" title="Download Soal">
+                        <Download className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
                   </div>
-                  <div className="flex items-center gap-2">
-                    <button onClick={() => setViewingExamModal(ex)} className="px-3 py-1.5 rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-xs font-bold flex items-center gap-1">
-                      <Eye className="w-3.5 h-3.5" /> View
-                    </button>
-                    <button onClick={() => handleDownloadExam(ex)} className="px-3 py-1.5 rounded-xl bg-emerald-50 hover:bg-emerald-100 text-emerald-700 text-xs font-bold flex items-center gap-1">
-                      <Download className="w-3.5 h-3.5" /> Download
-                    </button>
-                    <button onClick={() => handleDeleteExam(ex.id)} className="px-3 py-1.5 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-700 text-xs font-bold flex items-center gap-1">
-                      <Trash2 className="w-3.5 h-3.5" /> Delete
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
 
+        {/* TAB 3: SCAN KOREKSI */}
         {activeTab === 'scanner' && (
-          <div className="grid lg:grid-cols-12 gap-6">
-            <div className="lg:col-span-5 bg-white rounded-2xl border p-5 space-y-4 shadow-sm h-fit">
-              <h2 className="font-bold text-base flex items-center gap-2 text-slate-900">
-                <Camera className="w-5 h-5 text-indigo-600" /> Scan Koreksi Lembar Kerja
+          <div className="max-w-2xl mx-auto bg-white rounded-2xl border p-6 shadow-sm space-y-5">
+            <div>
+              <h2 className="font-bold text-lg text-slate-900 flex items-center gap-2">
+                <Sparkles className="w-5 h-5 text-indigo-600" /> Smart Scan Koreksi Lembar Kerja
               </h2>
+              <p className="text-xs text-slate-500 mt-0.5">Hasil scan otomatis mencatat tanggal koreksi dan muncul di portal orang tua (View-Only).</p>
+            </div>
+
+            <div className="grid sm:grid-cols-2 gap-4">
               <div>
-                <label className="block text-xs font-semibold mb-1">Pilih Siswa</label>
-                <select value={scanStudentId} onChange={(e) => setScanStudentId(e.target.value)} className="w-full p-2.5 rounded-xl border text-sm bg-white">
+                <label className="block text-xs font-bold text-slate-700 mb-1.5">Pilih Siswa</label>
+                <select value={scanStudentId} onChange={(e) => setScanStudentId(e.target.value)} className="w-full px-3.5 py-2.5 border rounded-xl text-sm bg-white">
+                  <option value="">-- Pilih Siswa --</option>
                   {students.map((s) => <option key={s.id} value={s.id}>{s.name} ({s.class})</option>)}
                 </select>
               </div>
               <div>
-                <label className="block text-xs font-semibold mb-1">Pilih Paket Soal</label>
-                <select value={scanExamId} onChange={(e) => setScanExamId(e.target.value)} className="w-full p-2.5 rounded-xl border text-sm bg-white">
-                  {exams.map((ex) => <option key={ex.id} value={ex.id}>{ex.title}</option>)}
+                <label className="block text-xs font-bold text-slate-700 mb-1.5">Paket Soal Acuan</label>
+                <select value={scanExamId} onChange={(e) => setScanExamId(e.target.value)} className="w-full px-3.5 py-2.5 border rounded-xl text-sm bg-white">
+                  <option value="">-- Pilih Paket Soal --</option>
+                  {exams.map((ex) => (
+                    <option key={ex.id} value={ex.id}>
+                      {ex.title} (Upload: {ex.uploadDate || '-'})
+                    </option>
+                  ))}
                 </select>
               </div>
-              <label className="cursor-pointer w-full py-3 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-sm font-semibold flex items-center justify-center gap-2 shadow-sm">
-                <Camera className="w-4 h-4" /> Ambil Foto / Upload Gambar
-                <input type="file" accept="image/*" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) handleScanPhoto(); }} />
-              </label>
-              <button onClick={() => handleScanPhoto()} disabled={isScanning} className="w-full py-2.5 bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-xl text-xs font-semibold">
-                {isScanning ? 'Menganalisis...' : 'Simulasi Scan Koreksi'}
-              </button>
             </div>
 
-            <div className="lg:col-span-7">
-              {lastScanResult ? (
-                <div className="bg-white rounded-2xl border border-indigo-200 p-5 space-y-3 shadow-sm">
-                  <div className="flex justify-between items-center border-b pb-3">
-                    <div>
-                      <h3 className="font-bold text-base">{lastScanResult.student?.name}</h3>
-                      <p className="text-xs text-slate-500">{lastScanResult.exam?.title}</p>
-                    </div>
-                    <div className="text-xl font-extrabold text-indigo-600">Skor: {lastScanResult.submission.score}</div>
-                  </div>
-                  <div className="space-y-2">
-                    {lastScanResult.submission.results.map((r) => (
-                      <div key={r.no} className={`p-3 rounded-xl border text-xs ${r.status === 'correct' ? 'bg-emerald-50 border-emerald-200' : 'bg-rose-50 border-rose-200'}`}>
-                        <div className="font-bold">Soal No. {r.no} — {r.inkNote}</div>
-                      </div>
-                    ))}
-                  </div>
+            <label className="border-2 border-dashed border-indigo-200 bg-indigo-50/40 hover:bg-indigo-50 rounded-2xl p-8 flex flex-col items-center justify-center text-center cursor-pointer transition-all">
+              <Camera className="w-10 h-10 text-indigo-600 mb-2" />
+              <span className="text-sm font-bold text-indigo-900">
+                {isScanning ? 'Sedang Memindai & Mengoreksi...' : 'Ambil Foto / Upload Hasil Jawaban Siswa'}
+              </span>
+              <span className="text-xs text-slate-500 mt-1">Format JPG, PNG, atau Kamera HP</span>
+              <input
+                type="file"
+                accept="image/*"
+                capture="environment"
+                className="hidden"
+                disabled={isScanning}
+                onChange={(e) => {
+                  if (e.target.files && e.target.files[0]) {
+                    handleScanPhoto();
+                    e.target.value = '';
+                  }
+                }}
+              />
+            </label>
+
+            {lastScanResult && (
+              <div className="p-4 rounded-2xl bg-emerald-50 border border-emerald-200 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-emerald-800 flex items-center gap-1.5">
+                    <CheckCircle2 className="w-4 h-4" /> Koreksi Selesai & Tersimpan!
+                  </span>
+                  <span className="text-sm font-extrabold text-emerald-900">Skor: {lastScanResult.submission.score}</span>
                 </div>
-              ) : (
-                <div className="bg-white rounded-2xl border p-8 text-center text-slate-400 text-xs">
-                  Hasil scan koreksi akan muncul di sini dan tersimpan ke arsip siswa.
-                </div>
-              )}
-            </div>
+                <p className="text-xs text-emerald-700">
+                  Siswa: <strong>{lastScanResult.student?.name}</strong> • Paket: <strong>{lastScanResult.exam?.title}</strong> • Tanggal Scan: <strong>{lastScanResult.submission.date}</strong>
+                </p>
+              </div>
+            )}
           </div>
         )}
 
+        {/* TAB 4: ABSENSI HARIAN */}
         {activeTab === 'attendance' && (
-          <div className="space-y-5">
-            <div className="bg-indigo-900 text-white p-5 rounded-2xl shadow-sm flex flex-wrap items-center justify-between gap-3">
+          <div className="bg-white rounded-2xl border p-6 shadow-sm space-y-4">
+            <div className="flex flex-wrap justify-between items-center gap-2 border-b pb-3">
               <div>
-                <span className="text-xs uppercase tracking-wider text-indigo-300 font-semibold">Formulir Kehadiran Harian</span>
-                <h2 className="text-xl font-bold mt-0.5">
-                  Absensi Hari Ini: {currentDayName}, {currentDateNum} {currentMonthName} {currentYear}
-                </h2>
+                <h2 className="font-bold text-lg text-slate-900">Absensi Harian Tempat Les</h2>
+                <p className="text-xs text-slate-500">{currentDayName}, {currentDateNum} {currentMonthName} {currentYear}</p>
               </div>
-              <span className="px-3 py-1 rounded-xl bg-indigo-800 text-xs font-semibold border border-indigo-700">
-                Otomatis Notifikasi WA Wali
-              </span>
             </div>
 
-            <div className="bg-white rounded-2xl border divide-y divide-slate-100 shadow-sm">
+            <div className="divide-y">
               {students.map((std) => {
-                const selectedStatus = todayAttendanceDraft[std.id] || '';
-                const isRowDirty = !!attendanceDirty[std.id];
-                const isSavedToday = !isRowDirty && !!(attendanceRecords[todayKey] && attendanceRecords[todayKey][std.id]);
+                const savedToday = attendanceRecords[todayKey]?.[std.id];
+                const currentChoice = todayAttendanceDraft[std.id] || savedToday || '';
+                const isDirty = attendanceDirty[std.id];
 
                 return (
-                  <div key={std.id} className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div key={std.id} className="py-3.5 flex flex-wrap items-center justify-between gap-3">
                     <div>
-                      <div className="font-bold text-sm text-slate-900">{std.name} <span className="text-xs font-normal text-slate-500">({std.class})</span></div>
-                      <div className="text-xs text-slate-500">WA Wali: {std.whatsapp || '-'}</div>
+                      <p className="font-bold text-sm text-slate-900">{std.name} <span className="text-xs font-normal text-slate-500">({std.class})</span></p>
+                      <p className="text-[11px] text-slate-500">Wali: {std.parentName}</p>
                     </div>
                     <div className="flex flex-wrap items-center gap-2">
-                      {['Hadir', 'Tidak Hadir', 'Izin'].map((statusOpt) => {
-                        const active = selectedStatus === statusOpt;
-                        let activeColor = 'bg-indigo-600 text-white border-indigo-600';
-                        if (statusOpt === 'Hadir') activeColor = 'bg-emerald-600 text-white border-emerald-600';
-                        if (statusOpt === 'Tidak Hadir') activeColor = 'bg-rose-600 text-white border-rose-600';
-                        if (statusOpt === 'Izin') activeColor = 'bg-amber-500 text-white border-amber-500';
-
-                        return (
-                          <button
-                            key={statusOpt}
-                            onClick={() => handleSelectAttendance(std.id, statusOpt)}
-                            className={`px-3 py-1.5 rounded-xl text-xs font-bold border transition-all ${active ? activeColor : 'bg-slate-50 text-slate-600 border-slate-200'}`}
-                          >
-                            {statusOpt}
-                          </button>
-                        );
-                      })}
+                      {['Hadir', 'Izin', 'Tidak Hadir'].map((st) => (
+                        <button
+                          key={st}
+                          onClick={() => handleSelectAttendance(std.id, st)}
+                          className={`px-3 py-1.5 rounded-xl text-xs font-bold border transition-all ${
+                            currentChoice === st
+                              ? st === 'Hadir'
+                                ? 'bg-emerald-600 text-white border-emerald-600'
+                                : st === 'Izin'
+                                ? 'bg-amber-500 text-white border-amber-500'
+                                : 'bg-rose-600 text-white border-rose-600'
+                              : 'bg-white text-slate-600 hover:bg-slate-50'
+                          }`}
+                        >
+                          {st}
+                        </button>
+                      ))}
                       <button
                         onClick={() => handleSaveAttendanceRow(std)}
-                        disabled={!isRowDirty}
-                        className={`ml-1 px-4 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all ${isRowDirty ? 'bg-indigo-600 hover:bg-indigo-700 text-white shadow-sm animate-pulse cursor-pointer' : isSavedToday ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' : 'bg-slate-100 text-slate-400 cursor-not-allowed'}`}
+                        disabled={!currentChoice}
+                        className={`px-3.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1 ${
+                          isDirty
+                            ? 'bg-indigo-600 text-white shadow-sm'
+                            : savedToday
+                            ? 'bg-slate-100 text-slate-600'
+                            : 'bg-slate-100 text-slate-400 cursor-not-allowed'
+                        }`}
                       >
-                        <Save className="w-3.5 h-3.5" />
-                        {isRowDirty ? 'Save & Kirim WA' : isSavedToday ? 'Terkirim' : 'Save'}
+                        <Save className="w-3.5 h-3.5" /> {savedToday && !isDirty ? 'Terkirim WA' : 'Simpan & WA'}
                       </button>
                     </div>
                   </div>
@@ -828,231 +1001,151 @@ export default function App() {
           </div>
         )}
 
+        {/* TAB 5: KALENDER KEHADIRAN */}
         {activeTab === 'calendar' && (
-          <div className="space-y-5">
-            <div className="bg-white p-5 rounded-2xl border shadow-sm">
-              <h2 className="text-lg font-bold text-slate-900 flex items-center gap-2 mb-4">
-                <CalendarIcon className="w-5 h-5 text-indigo-600" /> Kalender Kehadiran — {currentMonthName} {currentYear}
-              </h2>
-              <div className="grid grid-cols-7 gap-2">
-                {calendarDays.map((dayNum) => {
-                  const dateKey = `${currentYear}-${String(currentMonthIdx + 1).padStart(2, '0')}-${String(dayNum).padStart(2, '0')}`;
-                  const hasData = !!attendanceRecords[dateKey];
-                  const isToday = dayNum === currentDateNum;
-                  const isSelected = selectedCalDate === dateKey;
-
-                  return (
-                    <button
-                      key={dayNum}
-                      onClick={() => setSelectedCalDate(isSelected ? null : dateKey)}
-                      className={`p-3 rounded-xl border text-center transition-all flex flex-col items-center justify-center ${isSelected ? 'bg-indigo-600 text-white border-indigo-600' : isToday ? 'bg-indigo-50 border-indigo-400 text-indigo-900 font-bold' : hasData ? 'bg-emerald-50 border-emerald-200 text-slate-800' : 'bg-white text-slate-600'}`}
-                    >
-                      <span className="text-sm font-bold">{dayNum}</span>
-                      {hasData && <span className={`w-1.5 h-1.5 rounded-full mt-1 ${isSelected ? 'bg-white' : 'bg-emerald-500'}`}></span>}
-                    </button>
-                  );
-                })}
-              </div>
-
-              {selectedCalDate && (
-                <div className="mt-5 p-4 rounded-2xl bg-slate-50 border space-y-3">
-                  <div className="flex items-center justify-between border-b pb-2">
-                    <h3 className="font-bold text-sm text-slate-900">Rekap Kehadiran Tanggal: {selectedCalDate}</h3>
-                    <span className="text-[11px] font-semibold px-2 py-0.5 rounded bg-slate-200 text-slate-700">View Only</span>
-                  </div>
-                  <div className="divide-y divide-slate-200/70">
-                    {students.map((std) => {
-                      const rec = attendanceRecords[selectedCalDate]?.[std.id] || 'Belum ada data';
-                      return (
-                        <div key={std.id} className="py-2 flex items-center justify-between text-xs">
-                          <span className="font-semibold text-slate-800">{std.name} ({std.class})</span>
-                          <span className={`px-2.5 py-0.5 rounded-full font-bold ${rec === 'Hadir' ? 'bg-emerald-100 text-emerald-800' : rec === 'Tidak Hadir' ? 'bg-rose-100 text-rose-800' : rec === 'Izin' ? 'bg-amber-100 text-amber-800' : 'bg-slate-200 text-slate-500'}`}>
-                            {rec}
-                          </span>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
+          <div className="bg-white rounded-2xl border p-6 shadow-sm space-y-4">
+            <h2 className="font-bold text-lg text-slate-900 flex items-center gap-2">
+              <CalendarIcon className="w-5 h-5 text-indigo-600" /> Kalender Kehadiran ({currentMonthName} {currentYear})
+            </h2>
+            <div className="grid grid-cols-7 gap-2">
+              {calendarDays.map((dayNum) => {
+                const dKey = `${currentYear}-${String(currentMonthIdx + 1).padStart(2, '0')}-${String(dayNum).padStart(2, '0')}`;
+                const dayRecs = attendanceRecords[dKey] || {};
+                const presentCount = Object.values(dayRecs).filter((v) => v === 'Hadir').length;
+                return (
+                  <button
+                    key={dayNum}
+                    onClick={() => setSelectedCalDate(dKey)}
+                    className={`p-3 rounded-xl border text-left transition-all ${
+                      selectedCalDate === dKey ? 'border-indigo-600 bg-indigo-50' : 'bg-slate-50 hover:bg-white'
+                    }`}
+                  >
+                    <span className="font-bold text-sm text-slate-800 block">{dayNum}</span>
+                    {presentCount > 0 && (
+                      <span className="text-[10px] font-bold text-emerald-700 bg-emerald-100 px-1.5 py-0.5 rounded mt-1 inline-block">
+                        {presentCount} Hadir
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
             </div>
+            {selectedCalDate && (
+              <div className="p-4 rounded-xl bg-slate-50 border text-xs space-y-1">
+                <p className="font-bold text-slate-800">Detail Tanggal: {selectedCalDate}</p>
+                {Object.keys(attendanceRecords[selectedCalDate] || {}).length === 0 ? (
+                  <p className="text-slate-500">Tidak ada catatan absensi pada tanggal ini.</p>
+                ) : (
+                  Object.entries(attendanceRecords[selectedCalDate]).map(([sId, st]) => {
+                    const sName = students.find((s) => s.id === sId)?.name || sId;
+                    return <p key={sId}>• {sName}: <strong>{st}</strong></p>;
+                  })
+                )}
+              </div>
+            )}
           </div>
         )}
 
+        {/* TAB 6: STATUS PEMBAYARAN SPP */}
         {activeTab === 'payments' && (
-          <div className="space-y-6">
-            <div className="bg-white rounded-2xl border p-5 shadow-sm space-y-4">
-              <div className="flex flex-wrap items-center justify-between gap-2 border-b pb-3">
+          <div className="space-y-4">
+            <div className="bg-white rounded-2xl border p-6 shadow-sm space-y-4">
+              <div className="flex flex-wrap justify-between items-center gap-2 border-b pb-3">
                 <div>
-                  <span className="text-xs font-bold uppercase text-indigo-600">Tagihan Bulan Berjalan</span>
-                  <h2 className="text-lg font-bold text-slate-900">Status Pembayaran Bulan {currentMonthName} {currentYear}</h2>
+                  <h2 className="font-bold text-lg text-slate-900">SPP Bulan {currentMonthName} {currentYear}</h2>
+                  <p className="text-xs text-slate-500">Klik tombol status untuk menandai Lunas dan mengirim kuitansi WhatsApp otomatis.</p>
                 </div>
                 {showPaymentBadgeAlert && (
-                  <span className="px-3 py-1 rounded-full bg-rose-50 text-rose-700 border border-rose-200 text-xs font-bold flex items-center gap-1.5">
-                    <AlertCircle className="w-4 h-4 text-rose-600" /> Mendekati Akhir Bulan: Ada SPP Belum Lunas
+                  <span className="px-3 py-1.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs font-bold flex items-center gap-1.5">
+                    <AlertCircle className="w-4 h-4" /> Mendekati Akhir Bulan: Ada SPP Belum Lunas
                   </span>
                 )}
               </div>
 
-              <div className="divide-y divide-slate-100">
+              <div className="divide-y">
                 {students.map((std) => {
                   const status = currentMonthPayments[std.id] || 'Belum Lunas';
-                  const isUnpaid = status !== 'Lunas';
-
                   return (
-                    <div key={std.id} className="py-3.5 flex items-center justify-between gap-3">
-                      <div className="flex items-center gap-2">
-                        <span className="font-bold text-sm text-slate-900">{std.name}</span>
-                        <span className="text-xs text-slate-500">({std.class})</span>
-                        {isNearEndOfMonth && isUnpaid && <AlertCircle className="w-4 h-4 text-rose-600" title="Belum Lunas jelang akhir bulan" />}
+                    <div key={std.id} className="py-3 flex items-center justify-between gap-3">
+                      <div>
+                        <p className="font-bold text-sm text-slate-900">{std.name} <span className="text-xs font-normal text-slate-500">({std.class})</span></p>
+                        <p className="text-[11px] text-slate-500">Wali: {std.parentName}</p>
                       </div>
-                      <div className="flex items-center gap-2">
-                        <button onClick={() => handleTogglePaymentStatus(std, currentMonthKey)} className={`px-3.5 py-1.5 rounded-xl text-xs font-bold ${isUnpaid ? 'bg-rose-600 text-white' : 'bg-slate-100 text-slate-500'}`}>
-                          Belum Lunas
-                        </button>
-                        <button onClick={() => handleTogglePaymentStatus(std, currentMonthKey)} className={`px-3.5 py-1.5 rounded-xl text-xs font-bold ${!isUnpaid ? 'bg-emerald-600 text-white' : 'bg-slate-100 text-slate-500'}`}>
-                          Lunas
-                        </button>
-                      </div>
+                      <button
+                        onClick={() => handleTogglePaymentStatus(std, currentMonthKey)}
+                        className={`px-4 py-2 rounded-xl text-xs font-bold text-white shadow-xs transition-all ${
+                          status === 'Lunas' ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-rose-600 hover:bg-rose-700'
+                        }`}
+                      >
+                        {status}
+                      </button>
                     </div>
                   );
                 })}
               </div>
             </div>
 
-            <div className="space-y-2.5">
-              <h3 className="text-sm font-bold text-slate-700">Riwayat 3 Bulan Sebelumnya</h3>
-              {previousThreeMonths.map((prevM) => {
-                const isOpen = openPrevMonthToggle === prevM.key;
-                const prevRecords = payments[prevM.key] || {};
-
-                return (
-                  <div key={prevM.key} className="bg-white rounded-2xl border overflow-hidden shadow-xs">
-                    <button onClick={() => setOpenPrevMonthToggle(isOpen ? null : prevM.key)} className="w-full px-5 py-3.5 flex items-center justify-between text-left hover:bg-slate-50">
-                      <span className="font-bold text-sm text-slate-800">Status Pembayaran Bulan {prevM.label}</span>
-                      {isOpen ? <ChevronUp className="w-4 h-4 text-slate-500" /> : <ChevronDown className="w-4 h-4 text-slate-500" />}
-                    </button>
-                    {isOpen && (
-                      <div className="px-5 pb-4 pt-2 border-t divide-y divide-slate-100">
-                        {students.map((std) => {
-                          const st = prevRecords[std.id] || 'Belum Lunas';
-                          const unpaid = st !== 'Lunas';
-                          return (
-                            <div key={std.id} className="py-2.5 flex items-center justify-between text-xs">
-                              <span className="font-semibold text-slate-800">{std.name}</span>
-                              <div className="flex gap-2">
-                                <button onClick={() => handleTogglePaymentStatus(std, prevM.key)} className={`px-3 py-1 rounded-lg font-bold ${unpaid ? 'bg-rose-600 text-white' : 'bg-slate-100 text-slate-500'}`}>Belum Lunas</button>
-                                <button onClick={() => handleTogglePaymentStatus(std, prevM.key)} className={`px-3 py-1 rounded-lg font-bold ${!unpaid ? 'bg-emerald-600 text-white' : 'bg-slate-100 text-slate-500'}`}>Lunas</button>
-                              </div>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-
-            <div className="bg-white rounded-2xl border overflow-hidden shadow-sm">
-              <button onClick={() => setOpenYearlyRecap(!openYearlyRecap)} className="w-full px-5 py-4 bg-slate-900 text-white flex items-center justify-between font-bold text-sm">
-                <span>Rekap Pembayaran SPP Tahun {currentYear} (View Only)</span>
-                {openYearlyRecap ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-              </button>
-              {openYearlyRecap && (
-                <div className="p-5 space-y-4">
-                  <div className="flex flex-wrap gap-2">
-                    {MONTHS_ID.map((mName, idx) => {
-                      const mKey = `${currentYear}-${String(idx + 1).padStart(2, '0')}`;
-                      const active = selectedRecapMonth === mKey;
-                      return (
-                        <button key={mKey} onClick={() => setSelectedRecapMonth(active ? null : mKey)} className={`px-3 py-1.5 rounded-xl text-xs font-bold border ${active ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-slate-50 text-slate-700'}`}>
-                          {mName}
-                        </button>
-                      );
-                    })}
-                  </div>
-                  {selectedRecapMonth && (
-                    <div className="border rounded-xl overflow-hidden">
-                      <table className="w-full text-left text-xs">
-                        <thead className="bg-slate-100 text-slate-700 font-bold">
-                          <tr>
-                            <th className="p-3">Nama Siswa</th>
-                            <th className="p-3">Kelas</th>
-                            <th className="p-3 text-right">Status Pembayaran</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-slate-100">
-                          {students.map((std) => {
-                            const recStatus = (payments[selectedRecapMonth] && payments[selectedRecapMonth][std.id]) || 'Belum Lunas';
-                            return (
-                              <tr key={std.id}>
-                                <td className="p-3 font-semibold">{std.name}</td>
-                                <td className="p-3 text-slate-500">{std.class}</td>
-                                <td className="p-3 text-right">
-                                  <span className={`px-2.5 py-1 rounded-lg font-bold text-white ${recStatus === 'Lunas' ? 'bg-emerald-600' : 'bg-rose-600'}`}>{recStatus}</span>
-                                </td>
-                              </tr>
-                            );
-                          })}
-                        </tbody>
-                      </table>
+            {/* Riwayat 3 Bulan Sebelumnya */}
+            <div className="bg-white rounded-2xl border p-5 shadow-sm space-y-3">
+              <h3 className="font-bold text-sm text-slate-800">Riwayat SPP 3 Bulan Sebelumnya</h3>
+              {previousThreeMonths.map((m) => (
+                <div key={m.key} className="border rounded-xl overflow-hidden">
+                  <button
+                    onClick={() => setOpenPrevMonthToggle(openPrevMonthToggle === m.key ? null : m.key)}
+                    className="w-full px-4 py-3 bg-slate-50 flex items-center justify-between text-xs font-bold text-slate-700"
+                  >
+                    <span>{m.label}</span>
+                    {openPrevMonthToggle === m.key ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+                  </button>
+                  {openPrevMonthToggle === m.key && (
+                    <div className="p-4 divide-y bg-white">
+                      {students.map((std) => {
+                        const st = (payments[m.key] || {})[std.id] || 'Belum Lunas';
+                        return (
+                          <div key={std.id} className="py-2 flex items-center justify-between text-xs">
+                            <span>{std.name}</span>
+                            <button
+                              onClick={() => handleTogglePaymentStatus(std, m.key)}
+                              className={`px-3 py-1 rounded-lg font-bold text-white ${st === 'Lunas' ? 'bg-emerald-600' : 'bg-rose-600'}`}
+                            >
+                              {st}
+                            </button>
+                          </div>
+                        );
+                      })}
                     </div>
                   )}
                 </div>
-              )}
+              ))}
             </div>
           </div>
         )}
 
+        {/* TAB 7: CATATAN GURU */}
         {activeTab === 'notes' && (
           <div className="space-y-4">
-            <div>
-              <h2 className="text-xl font-bold text-slate-900">Catatan Guru untuk Orang Tua</h2>
-              <p className="text-xs text-slate-500">Catatan yang disimpan di sini otomatis tampil di dashboard orang tua masing-masing.</p>
-            </div>
-            <div className="space-y-3">
+            <h2 className="text-xl font-bold text-slate-900">Catatan Perkembangan Siswa ({currentMonthName})</h2>
+            <div className="grid md:grid-cols-2 gap-4">
               {students.map((std) => {
-                const savedNoteObj = teacherNotes[std.id] || { month: currentMonthName, note: '' };
-                const draft = noteDrafts[std.id] || savedNoteObj;
-
+                const currentNote = noteDrafts[std.id] !== undefined ? noteDrafts[std.id] : (teacherNotes[std.id]?.note || '');
                 return (
-                  <div key={std.id} className="bg-white rounded-2xl border p-4 shadow-sm flex flex-col lg:flex-row lg:items-center gap-3">
-                    <div className="lg:w-48 shrink-0">
-                      <div className="font-bold text-sm text-slate-900">{std.name}</div>
-                      <div className="text-xs text-slate-500">{std.class}</div>
+                  <div key={std.id} className="bg-white rounded-2xl border p-5 shadow-sm space-y-3">
+                    <div className="flex justify-between items-center">
+                      <h3 className="font-bold text-base text-slate-900">{std.name} <span className="text-xs font-normal text-slate-500">({std.class})</span></h3>
+                      {noteSavedAlert[std.id] && <span className="text-xs font-bold text-emerald-600">Tersimpan!</span>}
                     </div>
-                    <select
-                      value={draft.month}
-                      onChange={(e) => setNoteDrafts({ ...noteDrafts, [std.id]: { ...draft, month: e.target.value } })}
-                      className="px-3 py-2 rounded-xl border text-xs font-semibold bg-white lg:w-36"
-                    >
-                      {MONTHS_ID.map((m) => <option key={m} value={m}>{m}</option>)}
-                    </select>
-                    <input
-                      type="text"
-                      placeholder={`Tulis catatan perkembangan ${std.name}...`}
-                      value={draft.note}
-                      onChange={(e) => setNoteDrafts({ ...noteDrafts, [std.id]: { ...draft, note: e.target.value } })}
-                      className="flex-1 px-3.5 py-2 rounded-xl border text-xs"
+                    <textarea
+                      rows="3"
+                      placeholder="Tulis catatan evaluasi belajar siswa bulan ini untuk dilihat orang tua..."
+                      value={currentNote}
+                      onChange={(e) => setNoteDrafts({ ...noteDrafts, [std.id]: e.target.value })}
+                      className="w-full p-3 border rounded-xl text-xs focus:outline-none focus:border-indigo-500"
                     />
                     <button
-                      onClick={async () => {
-                        setTeacherNotes({ ...teacherNotes, [std.id]: draft });
-                        setNoteSavedAlert({ ...noteSavedAlert, [std.id]: true });
-                        setTimeout(() => setNoteSavedAlert((prev) => ({ ...prev, [std.id]: false })), 2000);
-
-                        if (supabase) {
-                          await supabase.from('teacher_notes').upsert({
-                            student_id: std.id,
-                            month: draft.month,
-                            note: draft.note
-                          });
-                        }
-                      }}
-                      className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 shrink-0"
+                      onClick={() => handleSaveTeacherNote(std.id)}
+                      className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold flex items-center gap-1.5"
                     >
-                      {noteSavedAlert[std.id] ? <><CheckCircle2 className="w-3.5 h-3.5" /> Tersimpan</> : <><Save className="w-3.5 h-3.5" /> Save</>}
+                      <Save className="w-3.5 h-3.5" /> Simpan Catatan
                     </button>
                   </div>
                 );
@@ -1062,62 +1155,137 @@ export default function App() {
         )}
       </div>
 
-      {viewingExamModal && (
-        <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-xs z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl max-w-2xl w-full max-h-[85vh] overflow-y-auto p-6 shadow-xl space-y-4">
-            <div className="flex items-start justify-between gap-3 border-b pb-3">
-              <div>
-                <span className="text-xs font-bold text-indigo-700">{viewingExamModal.subject} • {viewingExamModal.upload_date || viewingExamModal.uploadDate}</span>
-                <h3 className="font-bold text-lg text-slate-900">{viewingExamModal.title}</h3>
-                <p className="text-xs text-slate-400">File: {viewingExamModal.file_name || viewingExamModal.fileName}</p>
-              </div>
-              <button onClick={() => setViewingExamModal(null)} className="p-1 rounded-lg text-slate-400 hover:bg-slate-100"><X className="w-5 h-5" /></button>
+      {/* MODAL RENAME DATA SISWA */}
+      {renameModalStudent && (
+        <div className="fixed inset-0 bg-slate-900/50 z-50 flex items-center justify-center p-4">
+          <form onSubmit={handleSaveRename} className="bg-white rounded-2xl max-w-md w-full p-6 space-y-4 shadow-xl">
+            <div className="flex justify-between items-center border-b pb-3">
+              <h3 className="font-bold text-base">Edit Profil Siswa</h3>
+              <button type="button" onClick={() => setRenameModalStudent(null)}><X className="w-4 h-4" /></button>
             </div>
-            <div className="space-y-3">
-              {viewingExamModal.questions.map((q) => (
-                <div key={q.no} className="p-3.5 rounded-xl border bg-slate-50 text-xs space-y-1">
-                  <div className="font-bold text-slate-900">Soal No. {q.no} (Topik: {q.topic})</div>
-                  <p className="text-slate-800 font-medium">{q.text}</p>
-                  <p className="text-slate-500">Kunci Jawaban: <strong className="text-indigo-600">{q.answerKey}</strong></p>
+            <div className="space-y-3 text-xs">
+              <div>
+                <label className="block font-bold mb-1">Nama Siswa</label>
+                <input type="text" value={editStudentName} onChange={(e) => setEditStudentName(e.target.value)} className="w-full px-3 py-2 border rounded-xl" required />
+              </div>
+              <div>
+                <label className="block font-bold mb-1">Kelas</label>
+                <select value={editStudentClass} onChange={(e) => setEditStudentClass(e.target.value)} className="w-full px-3 py-2 border rounded-xl bg-white">
+                  {CLASS_OPTIONS.map((c) => <option key={c} value={c}>{c}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className="block font-bold mb-1">Wali Murid</label>
+                <input type="text" value={editParentName} onChange={(e) => setEditParentName(e.target.value)} className="w-full px-3 py-2 border rounded-xl" />
+              </div>
+              <div>
+                <label className="block font-bold mb-1">WhatsApp Wali</label>
+                <input type="tel" value={editWhatsapp} onChange={(e) => setEditWhatsapp(e.target.value)} className="w-full px-3 py-2 border rounded-xl" />
+              </div>
+            </div>
+            <div className="flex justify-end gap-2 pt-2">
+              <button type="button" onClick={() => setRenameModalStudent(null)} className="px-4 py-2 rounded-xl border text-xs font-bold">Batal</button>
+              <button type="submit" className="px-4 py-2 rounded-xl bg-indigo-600 text-white text-xs font-bold">Terapkan</button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* MODAL VIEW SOAL (PREVIEW) */}
+      {viewingExamModal && (
+        <div className="fixed inset-0 bg-slate-900/50 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-xl w-full p-6 space-y-4 shadow-xl max-h-[85vh] flex flex-col">
+            <div className="flex justify-between items-start border-b pb-3">
+              <div>
+                <h3 className="font-bold text-base text-slate-900">{viewingExamModal.title}</h3>
+                <p className="text-xs text-slate-500 mt-0.5">Tanggal Upload: <strong>{viewingExamModal.uploadDate || '-'}</strong></p>
+              </div>
+              <button onClick={() => setViewingExamModal(null)}><X className="w-4 h-4" /></button>
+            </div>
+            <div className="overflow-y-auto space-y-2.5 flex-1 text-xs">
+              {(viewingExamModal.questions || []).map((q, idx) => (
+                <div key={idx} className="p-3 rounded-xl bg-slate-50 border space-y-1">
+                  <p className="font-bold text-slate-800">{q.no}. {q.text}</p>
+                  <p className="text-indigo-700 font-semibold">Kunci Jawaban: {q.answerKey}</p>
                 </div>
               ))}
+            </div>
+            <div className="flex justify-end gap-2 border-t pt-3">
+              <button onClick={() => { setViewingExamModal(null); handleOpenEditExam(viewingExamModal); }} className="px-4 py-2 rounded-xl bg-amber-500 text-white text-xs font-bold flex items-center gap-1.5">
+                <Edit3 className="w-3.5 h-3.5" /> Edit Soal Ini
+              </button>
+              <button onClick={() => setViewingExamModal(null)} className="px-4 py-2 rounded-xl bg-slate-800 text-white text-xs font-bold">Tutup</button>
             </div>
           </div>
         </div>
       )}
 
-      {renameModalStudent && (
-        <div className="fixed inset-0 bg-slate-900/50 flex items-center justify-center p-4 z-50">
-          <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-xl space-y-4">
+      {/* MODAL EDIT SOAL KHUSUS PENGAJAR */}
+      {editingExamModal && (
+        <div className="fixed inset-0 bg-slate-900/50 z-50 flex items-center justify-center p-4">
+          <form onSubmit={handleSaveEditedExam} className="bg-white rounded-2xl max-w-2xl w-full p-6 space-y-4 shadow-xl max-h-[90vh] flex flex-col">
             <div className="flex justify-between items-center border-b pb-3">
-              <h3 className="font-bold text-base">Rename Data Siswa</h3>
-              <button onClick={() => setRenameModalStudent(null)}><X className="w-4 h-4" /></button>
+              <div>
+                <h3 className="font-bold text-base text-slate-900">Edit Paket Soal (Hak Akses Pengajar)</h3>
+                <p className="text-[11px] text-slate-500">Diupload pada: {editingExamModal.uploadDate || '-'}</p>
+              </div>
+              <button type="button" onClick={() => setEditingExamModal(null)}><X className="w-4 h-4" /></button>
             </div>
-            <form onSubmit={handleSaveRename} className="space-y-3">
-              <div>
-                <label className="block text-xs font-bold mb-1">Nama Siswa</label>
-                <input type="text" value={editStudentName} onChange={(e) => setEditStudentName(e.target.value)} className="w-full px-3 py-2 border rounded-xl text-sm" required />
+
+            <div className="overflow-y-auto space-y-4 flex-1 pr-1 text-xs">
+              <div className="grid sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-bold mb-1">Judul Paket Soal</label>
+                  <input type="text" value={editExamTitle} onChange={(e) => setEditExamTitle(e.target.value)} className="w-full px-3 py-2 border rounded-xl" required />
+                </div>
+                <div>
+                  <label className="block font-bold mb-1">Mata Pelajaran / Kategori</label>
+                  <input type="text" value={editExamSubject} onChange={(e) => setEditExamSubject(e.target.value)} className="w-full px-3 py-2 border rounded-xl" />
+                </div>
               </div>
-              <div>
-                <label className="block text-xs font-bold mb-1">Kelas</label>
-                <select value={editStudentClass} onChange={(e) => setEditStudentClass(e.target.value)} className="w-full px-3 py-2 border rounded-xl text-sm bg-white">
-                  {CLASS_OPTIONS.map((c) => <option key={c} value={c}>{c}</option>)}
-                </select>
+
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="font-bold text-slate-700">Daftar Butir Soal & Kunci</span>
+                  <button type="button" onClick={handleAddQuestionRow} className="px-2.5 py-1 bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-lg font-bold flex items-center gap-1">
+                    <Plus className="w-3.5 h-3.5" /> Tambah Butir Soal
+                  </button>
+                </div>
+
+                {editExamQuestions.map((q, idx) => (
+                  <div key={idx} className="p-3.5 rounded-xl border bg-slate-50 space-y-2">
+                    <div className="flex justify-between items-center">
+                      <span className="font-bold text-indigo-700">Soal No. {q.no}</span>
+                      <button type="button" onClick={() => handleRemoveQuestionRow(idx)} className="text-rose-600 hover:underline text-[11px] font-semibold">
+                        Hapus Butir
+                      </button>
+                    </div>
+                    <textarea
+                      rows="2"
+                      placeholder="Tulis pertanyaan soal..."
+                      value={q.text}
+                      onChange={(e) => handleUpdateQuestionField(idx, 'text', e.target.value)}
+                      className="w-full p-2 border rounded-lg bg-white"
+                    />
+                    <input
+                      type="text"
+                      placeholder="Kunci jawaban..."
+                      value={q.answerKey}
+                      onChange={(e) => handleUpdateQuestionField(idx, 'answerKey', e.target.value)}
+                      className="w-full px-2.5 py-1.5 border rounded-lg bg-white"
+                    />
+                  </div>
+                ))}
               </div>
-              <div>
-                <label className="block text-xs font-bold mb-1">Nama Wali Murid</label>
-                <input type="text" value={editParentName} onChange={(e) => setEditParentName(e.target.value)} className="w-full px-3 py-2 border rounded-xl text-sm" required />
-              </div>
-              <div>
-                <label className="block text-xs font-bold mb-1">Nomor WhatsApp Wali</label>
-                <input type="tel" value={editWhatsapp} onChange={(e) => setEditWhatsapp(e.target.value)} className="w-full px-3 py-2 border rounded-xl text-sm" />
-              </div>
-              <div className="flex justify-end gap-2 pt-2">
-                <button type="button" onClick={() => setRenameModalStudent(null)} className="px-3 py-1.5 bg-slate-100 text-xs font-bold rounded-xl">Batal</button>
-                <button type="submit" className="px-4 py-1.5 bg-indigo-600 text-white text-xs font-bold rounded-xl">Terapkan</button>
-              </div>
-            </form>
-          </div>
+            </div>
+
+            <div className="flex justify-end gap-2 border-t pt-3">
+              <button type="button" onClick={() => setEditingExamModal(null)} className="px-4 py-2 rounded-xl border text-xs font-bold">Batal</button>
+              <button type="submit" className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold flex items-center gap-1.5">
+                <Save className="w-3.5 h-3.5" /> Simpan Perubahan Soal
+              </button>
+            </div>
+          </form>
         </div>
       )}
     </div>
