@@ -84,11 +84,11 @@ export default function App() {
   const [payments, setPayments] = useState({});
   const [teacherNotes, setTeacherNotes] = useState({});
 
-  // Sinkronisasi data real-time dengan Supabase Cloud Database
+    // Sinkronisasi data real-time dengan Supabase Cloud Database
   useEffect(() => {
     if (!supabase) return;
 
-    async function fetchAllData() {
+    const fetchAllData = async () => {
       try {
         const { data: stds } = await supabase.from('students').select('*');
         if (stds) setStudents(stds.map(s => ({
@@ -138,27 +138,52 @@ export default function App() {
           setTeacherNotes(noteMap);
         }
 
-                // Fetch attendance records dari Supabase agar data tidak hilang saat refresh
+        // Fetch attendance records dari Supabase
         const { data: attRecs } = await supabase.from('attendance').select('*');
-        let attMap = {};
         if (attRecs) {
+          const attMap = {};
           attRecs.forEach(a => {
             if (!attMap[a.date_key]) attMap[a.date_key] = {};
             attMap[a.date_key][a.student_id] = a.status;
           });
+          setAttendanceRecords(attMap);
         }
-        
-        // Gabungkan dengan localStorage sebagai cadangan (Supabase tetap prioritas)
-        const localAtt = JSON.parse(localStorage.getItem('albita_attendance') || '{}');
-        setAttendanceRecords({ ...localAtt, ...attMap });
       } catch (err) {
-
         console.error('Gagal mengambil data Supabase:', err);
       }
-    }
+    };
 
     fetchAllData();
+
+    // REAL-TIME SUBSCRIPTION: Agar perubahan di satu device langsung muncul di device lain
+    const attendanceChannel = supabase
+      .channel('public:attendance')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'attendance' }, (payload) => {
+        setAttendanceRecords((prev) => {
+          const newRecs = { ...prev };
+          if (payload.eventType === 'DELETE') {
+            // Handle delete if necessary
+          } else {
+            const { date_key, student_id, status } = payload.new;
+            if (!newRecs[date_key]) newRecs[date_key] = {};
+            newRecs[date_key][student_id] = status;
+          }
+          return newRecs;
+        });
+      })
+      .subscribe();
+
+    const studentChannel = supabase
+      .channel('public:students')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'students' }, fetchAllData)
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(attendanceChannel);
+      supabase.removeChannel(studentChannel);
+    };
   }, []);
+
 
   const [activeTab, setActiveTab] = useState('students');
   const [searchQuery, setSearchQuery] = useState('');
@@ -316,15 +341,11 @@ export default function App() {
     const chosenStatus = todayAttendanceDraft[student.id];
     if (!chosenStatus) return;
 
-    const updatedToday = { ...(attendanceRecords[todayKey] || {}), [student.id]: chosenStatus };
-    const newRecords = { ...attendanceRecords, [todayKey]: updatedToday };
-    setAttendanceRecords(newRecords);
+        const updatedToday = { ...(attendanceRecords[todayKey] || {}), [student.id]: chosenStatus };
+    setAttendanceRecords({ ...attendanceRecords, [todayKey]: updatedToday });
     setAttendanceDirty({ ...attendanceDirty, [student.id]: false });
 
-    // 1. Simpan ke LocalStorage agar instan dan tahan refresh
-    localStorage.setItem('albita_attendance', JSON.stringify(newRecords));
-
-    // 2. Simpan ke Supabase untuk sinkronisasi cloud
+    // Simpan ke Supabase untuk sinkronisasi cloud
     if (supabase) {
       await supabase.from('attendance').upsert({
         date_key: todayKey,
@@ -333,6 +354,7 @@ export default function App() {
       }, { onConflict: 'date_key,student_id' });
     }
   };
+
 
   const handleSendAttendanceWA = (student) => {
     const savedToday = attendanceRecords[todayKey]?.[student.id];
