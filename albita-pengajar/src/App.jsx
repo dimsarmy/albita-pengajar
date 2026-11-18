@@ -1,6 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { createClient } from '@supabase/supabase-js';
 import { GoogleGenerativeAI } from '@google/generative-ai';
+import mammoth from 'mammoth';
+import { Document, Packer, Paragraph, TextRun, HeadingLevel } from 'docx';
+import jsPDF from 'jspdf';
 import {
   Camera,
   Upload,
@@ -102,7 +105,8 @@ export default function App() {
         if (exms) setExams(exms.map(e => ({
           ...e,
           fileName: e.file_name || e.fileName,
-          uploadDate: e.upload_date || e.uploadDate
+          uploadDate: e.upload_date || e.uploadDate,
+          docContent: e.doc_content || e.docContent || ''
         })));
 
         const { data: subs } = await supabase.from('submissions').select('*');
@@ -132,6 +136,17 @@ export default function App() {
             noteMap[n.student_id] = { month: n.month, note: n.note };
           });
           setTeacherNotes(noteMap);
+        }
+
+        // Fetch attendance records dari Supabase agar data tidak hilang saat refresh
+        const { data: attRecs } = await supabase.from('attendance').select('*');
+        if (attRecs) {
+          const attMap = {};
+          attRecs.forEach(a => {
+            if (!attMap[a.date_key]) attMap[a.date_key] = {};
+            attMap[a.date_key][a.student_id] = a.status;
+          });
+          setAttendanceRecords(attMap);
         }
       } catch (err) {
         console.error('Gagal mengambil data Supabase:', err);
@@ -293,13 +308,22 @@ export default function App() {
     setAttendanceDirty({ ...attendanceDirty, [studentId]: true });
   };
 
-  const handleSaveAttendanceRow = (student) => {
+  const handleSaveAttendanceRow = async (student) => {
     const chosenStatus = todayAttendanceDraft[student.id];
     if (!chosenStatus) return;
 
     const updatedToday = { ...(attendanceRecords[todayKey] || {}), [student.id]: chosenStatus };
     setAttendanceRecords({ ...attendanceRecords, [todayKey]: updatedToday });
     setAttendanceDirty({ ...attendanceDirty, [student.id]: false });
+
+    // Simpan ke Supabase agar tidak hilang saat refresh
+    if (supabase) {
+      await supabase.from('attendance').upsert({
+        date_key: todayKey,
+        student_id: student.id,
+        status: chosenStatus
+      }, { onConflict: 'date_key,student_id' });
+    }
 
     if (student.whatsapp) {
       const waNumber = formatWaNumber(student.whatsapp);
@@ -418,21 +442,52 @@ export default function App() {
     }
   };
 
-  // UPLOAD DOKUMEN BANK SOAL + REKAM TANGGAL UPLOAD OTOMATIS
-  const handleUploadTeacherExam = async (fileName) => {
+  // UPLOAD DOKUMEN BANK SOAL + BACA ISI DOC + REKAM TANGGAL UPLOAD OTOMATIS
+  const handleUploadTeacherExam = async (file) => {
+    if (!file) return;
     setIsUploadingDoc(true);
     const timeStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
     const fullUploadDate = `${currentDateNum} ${currentMonthName} ${currentYear} (${timeStr})`;
+    const fileName = file.name;
+    const isDoc = /\.(doc|docx)$/i.test(fileName);
+
+    let docContent = '';
+    let parsedQuestions = [];
+
+    if (isDoc) {
+      try {
+        const arrayBuffer = await file.arrayBuffer();
+        const result = await mammoth.extractRawText({ arrayBuffer });
+        docContent = result.value || '';
+        // Parse baris-baris sebagai butir soal (setiap baris non-kosong = 1 soal)
+        const lines = docContent.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+        parsedQuestions = lines.map((line, idx) => ({
+          no: idx + 1,
+          text: line,
+          answerKey: '',
+          topic: 'Materi'
+        }));
+      } catch (err) {
+        console.error('Gagal membaca file DOC:', err);
+        docContent = '';
+      }
+    }
+
+    // Jika tidak ada soal terparsing, buat placeholder minimal
+    if (parsedQuestions.length === 0) {
+      parsedQuestions = [
+        { no: 1, text: 'Isi soal dari dokumen. Klik "Edit Soal" untuk menambah/mengubah butir soal.', answerKey: '', topic: 'Materi' }
+      ];
+    }
 
     const newExam = {
       id: `exam-${Date.now()}`,
-      title: fileName ? fileName.replace(/\.(doc|docx|pdf|jpg|png)$/i, '').replace(/_/g, ' ') : 'Soal Jadi Pengajar',
-      fileName: fileName || 'Soal_Baru.docx',
+      title: fileName.replace(/\.(doc|docx|pdf|jpg|png)$/i, '').replace(/_/g, ' '),
+      fileName: fileName,
       uploadDate: fullUploadDate,
       subject: 'Bank Soal Guru',
-      questions: [
-        { no: 1, text: 'Contoh butir pertanyaan soal jadi pengajar...', answerKey: 'Kunci Jawaban', topic: 'Materi' }
-      ]
+      docContent: docContent,
+      questions: parsedQuestions
     };
 
     setExams([newExam, ...exams]);
@@ -445,7 +500,8 @@ export default function App() {
         file_name: newExam.fileName,
         upload_date: newExam.uploadDate,
         subject: newExam.subject,
-        questions: newExam.questions
+        questions: newExam.questions,
+        doc_content: newExam.docContent
       });
     }
   };
@@ -507,16 +563,89 @@ export default function App() {
     }
   };
 
-  const handleDownloadExam = (exam) => {
-    const content = `=== SOAL ALBITA ===\nJudul: ${exam.title}\nTanggal Upload: ${exam.uploadDate}\n\nButir Soal:\n` +
-      (exam.questions || []).map((q) => `${q.no}. ${q.text} (Kunci: ${q.answerKey})`).join('\n');
-    const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `${exam.fileName || 'Soal_Albita'}.txt`;
-    link.click();
-    URL.revokeObjectURL(url);
+  const handleDownloadExam = async (exam, format = 'doc') => {
+    const title = exam.title || 'Soal_Albita';
+    const questions = exam.questions || [];
+
+    if (format === 'pdf') {
+      // Download sebagai PDF
+      const pdf = new jsPDF({ unit: 'mm', format: 'a4' });
+      const margin = 15;
+      let y = margin;
+
+      pdf.setFontSize(14);
+      pdf.setFont('helvetica', 'bold');
+      pdf.text(title, margin, y);
+      y += 8;
+
+      pdf.setFontSize(9);
+      pdf.setFont('helvetica', 'normal');
+      pdf.text(`Mata Pelajaran: ${exam.subject || '-'}  |  Diupload: ${exam.uploadDate || '-'}`, margin, y);
+      y += 10;
+
+      pdf.setFontSize(10);
+      questions.forEach((q) => {
+        const soalText = `${q.no}. ${q.text}`;
+        const kunciText = q.answerKey ? `   Kunci: ${q.answerKey}` : '';
+        const lines = pdf.splitTextToSize(soalText, 180);
+        if (y + (lines.length * 6) + 10 > 280) {
+          pdf.addPage();
+          y = margin;
+        }
+        pdf.setFont('helvetica', 'normal');
+        pdf.text(lines, margin, y);
+        y += lines.length * 6;
+        if (kunciText) {
+          pdf.setFont('helvetica', 'italic');
+          pdf.setTextColor(80, 80, 180);
+          pdf.text(kunciText, margin + 4, y);
+          pdf.setTextColor(0, 0, 0);
+          y += 6;
+        }
+        y += 2;
+      });
+
+      pdf.save(`${title}.pdf`);
+    } else {
+      // Download sebagai .docx
+      const docChildren = [
+        new Paragraph({
+          text: title,
+          heading: HeadingLevel.HEADING_1,
+        }),
+        new Paragraph({
+          children: [
+            new TextRun({ text: `Mata Pelajaran: ${exam.subject || '-'}  |  Diupload: ${exam.uploadDate || '-'}`, italics: true, size: 20 })
+          ]
+        }),
+        new Paragraph({ text: '' }),
+        ...questions.map((q) => [
+          new Paragraph({
+            children: [
+              new TextRun({ text: `${q.no}. ${q.text}`, bold: false, size: 22 })
+            ]
+          }),
+          ...(q.answerKey ? [new Paragraph({
+            children: [
+              new TextRun({ text: `   Kunci Jawaban: ${q.answerKey}`, color: '4040AA', italics: true, size: 20 })
+            ]
+          })] : []),
+          new Paragraph({ text: '' }),
+        ]).flat()
+      ];
+
+      const doc = new Document({
+        sections: [{ children: docChildren }]
+      });
+
+      const blob = await Packer.toBlob(doc);
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `${title}.docx`;
+      link.click();
+      URL.revokeObjectURL(url);
+    }
   };
 
   // SCAN LEMBAR KERJA + TANGGAL SCAN OTOMATIS
@@ -816,7 +945,7 @@ export default function App() {
                   className="hidden"
                   onChange={(e) => {
                     if (e.target.files && e.target.files[0]) {
-                      handleUploadTeacherExam(e.target.files[0].name);
+                      handleUploadTeacherExam(e.target.files[0]);
                       e.target.value = '';
                     }
                   }}
@@ -861,8 +990,11 @@ export default function App() {
                       <button onClick={() => handleOpenEditExam(ex)} className="flex-1 py-2 px-3 bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5">
                         <Edit3 className="w-3.5 h-3.5" /> Edit Soal
                       </button>
-                      <button onClick={() => handleDownloadExam(ex)} className="py-2 px-3 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5" title="Download Soal">
-                        <Download className="w-3.5 h-3.5" />
+                      <button onClick={() => handleDownloadExam(ex, 'doc')} className="py-2 px-3 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-xl text-xs font-bold flex items-center justify-center gap-1" title="Download sebagai DOC">
+                        <Download className="w-3.5 h-3.5" /> DOC
+                      </button>
+                      <button onClick={() => handleDownloadExam(ex, 'pdf')} className="py-2 px-3 bg-rose-50 hover:bg-rose-100 text-rose-700 rounded-xl text-xs font-bold flex items-center justify-center gap-1" title="Download sebagai PDF">
+                        <Download className="w-3.5 h-3.5" /> PDF
                       </button>
                     </div>
                   </div>
@@ -1194,23 +1326,62 @@ export default function App() {
       {/* MODAL VIEW SOAL (PREVIEW) */}
       {viewingExamModal && (
         <div className="fixed inset-0 bg-slate-900/50 z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl max-w-xl w-full p-6 space-y-4 shadow-xl max-h-[85vh] flex flex-col">
+          <div className="bg-white rounded-2xl max-w-2xl w-full p-6 space-y-4 shadow-xl max-h-[85vh] flex flex-col">
             <div className="flex justify-between items-start border-b pb-3">
               <div>
                 <h3 className="font-bold text-base text-slate-900">{viewingExamModal.title}</h3>
-                <p className="text-xs text-slate-500 mt-0.5">Tanggal Upload: <strong>{viewingExamModal.uploadDate || '-'}</strong></p>
+                <p className="text-xs text-slate-500 mt-0.5">Tanggal Upload: <strong>{viewingExamModal.uploadDate || '-'}</strong> • {viewingExamModal.subject || 'Bank Soal'}</p>
               </div>
               <button onClick={() => setViewingExamModal(null)}><X className="w-4 h-4" /></button>
             </div>
-            <div className="overflow-y-auto space-y-2.5 flex-1 text-xs">
-              {(viewingExamModal.questions || []).map((q, idx) => (
-                <div key={idx} className="p-3 rounded-xl bg-slate-50 border space-y-1">
-                  <p className="font-bold text-slate-800">{q.no}. {q.text}</p>
-                  <p className="text-indigo-700 font-semibold">Kunci Jawaban: {q.answerKey}</p>
+
+            {/* Tabs Preview: Konten DOC asli / Butir Soal */}
+            <div className="overflow-y-auto flex-1 text-xs space-y-3">
+              {viewingExamModal.docContent ? (
+                <div>
+                  <p className="font-bold text-slate-600 mb-2 flex items-center gap-1.5">
+                    <FileText className="w-3.5 h-3.5 text-indigo-600" /> Isi Dokumen Asli
+                  </p>
+                  <div className="whitespace-pre-wrap bg-slate-50 border rounded-xl p-4 text-slate-800 leading-relaxed font-mono text-[11px] max-h-60 overflow-y-auto">
+                    {viewingExamModal.docContent}
+                  </div>
+                  {(viewingExamModal.questions || []).some(q => q.answerKey) && (
+                    <div className="mt-3">
+                      <p className="font-bold text-slate-600 mb-2">Butir Soal & Kunci (dari edit)</p>
+                      <div className="space-y-2">
+                        {(viewingExamModal.questions || []).map((q, idx) => (
+                          <div key={idx} className="p-3 rounded-xl bg-indigo-50 border border-indigo-100 space-y-1">
+                            <p className="font-bold text-slate-800">{q.no}. {q.text}</p>
+                            {q.answerKey && <p className="text-indigo-700 font-semibold">Kunci: {q.answerKey}</p>}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
-              ))}
+              ) : (
+                <div className="space-y-2.5">
+                  {(viewingExamModal.questions || []).length === 0 ? (
+                    <p className="text-slate-400 italic text-center py-6">Belum ada butir soal. Klik "Edit Soal" untuk menambahkan.</p>
+                  ) : (
+                    (viewingExamModal.questions || []).map((q, idx) => (
+                      <div key={idx} className="p-3 rounded-xl bg-slate-50 border space-y-1">
+                        <p className="font-bold text-slate-800">{q.no}. {q.text}</p>
+                        {q.answerKey && <p className="text-indigo-700 font-semibold">Kunci Jawaban: {q.answerKey}</p>}
+                      </div>
+                    ))
+                  )}
+                </div>
+              )}
             </div>
-            <div className="flex justify-end gap-2 border-t pt-3">
+
+            <div className="flex flex-wrap justify-end gap-2 border-t pt-3">
+              <button onClick={() => handleDownloadExam(viewingExamModal, 'doc')} className="px-3 py-2 rounded-xl bg-indigo-50 text-indigo-700 border border-indigo-200 text-xs font-bold flex items-center gap-1.5">
+                <Download className="w-3.5 h-3.5" /> DOC
+              </button>
+              <button onClick={() => handleDownloadExam(viewingExamModal, 'pdf')} className="px-3 py-2 rounded-xl bg-rose-50 text-rose-700 border border-rose-200 text-xs font-bold flex items-center gap-1.5">
+                <Download className="w-3.5 h-3.5" /> PDF
+              </button>
               <button onClick={() => { setViewingExamModal(null); handleOpenEditExam(viewingExamModal); }} className="px-4 py-2 rounded-xl bg-amber-500 text-white text-xs font-bold flex items-center gap-1.5">
                 <Edit3 className="w-3.5 h-3.5" /> Edit Soal Ini
               </button>
