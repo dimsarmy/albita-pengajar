@@ -342,18 +342,24 @@ export default function App() {
     if (!chosenStatus) return;
 
         const updatedToday = { ...(attendanceRecords[todayKey] || {}), [student.id]: chosenStatus };
-    setAttendanceRecords({ ...attendanceRecords, [todayKey]: updatedToday });
-    setAttendanceDirty({ ...attendanceDirty, [student.id]: false });
+        setAttendanceRecords(prev => ({ ...prev, [todayKey]: updatedToday }));
+        setAttendanceDirty({ ...attendanceDirty, [student.id]: false });
 
-    // Simpan ke Supabase untuk sinkronisasi cloud
-    if (supabase) {
-      await supabase.from('attendance').upsert({
-        date_key: todayKey,
-        student_id: student.id,
-        status: chosenStatus
-      }, { onConflict: 'date_key,student_id' });
-    }
+        // Simpan ke Supabase untuk sinkronisasi cloud
+        if (supabase) {
+          const { error } = await supabase.from('attendance').upsert({
+            date_key: todayKey,
+            student_id: student.id,
+            status: chosenStatus
+          }, { onConflict: 'date_key,student_id' });
+      
+          if (error) {
+            console.error("Gagal menyimpan absensi:", error);
+            alert("Gagal menyimpan ke database. Cek koneksi.");
+          }
+        }
   };
+
 
 
   const handleSendAttendanceWA = (student) => {
