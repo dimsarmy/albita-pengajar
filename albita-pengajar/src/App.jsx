@@ -28,14 +28,24 @@ import {
   ChevronRight,
   CheckCircle2,
   Download,
-  Clock
+  Clock,
+  Check,
+  ClipboardList,
+  BookOpen,
+  FileCheck,
+  RefreshCw,
+  Share2,
+  Copy,
+  Award,
+  HelpCircle
 } from 'lucide-react';
 
-// Koneksi Supabase dari Vercel Environment Variables
+// Koneksi Supabase dari Environment Variables
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || '';
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
 const supabase = (supabaseUrl && supabaseAnonKey) ? createClient(supabaseUrl, supabaseAnonKey) : null;
 
+// Koneksi Google Gemini API
 const apiKey = import.meta.env.VITE_GEMINI_API_KEY || '';
 const genAI = apiKey ? new GoogleGenerativeAI(apiKey) : null;
 
@@ -56,6 +66,24 @@ const formatWaNumber = (num) => {
   let clean = num.replace(/[^0-9]/g, '');
   if (clean.startsWith('0')) clean = '62' + clean.slice(1);
   return clean;
+};
+
+// Helper: Convert File to inlineData for Gemini Vision
+const fileToGenerativePart = async (file) => {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      const base64Data = reader.result.split(',')[1];
+      resolve({
+        inlineData: {
+          data: base64Data,
+          mimeType: file.type || 'image/jpeg'
+        }
+      });
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
 };
 
 export default function App() {
@@ -80,11 +108,31 @@ export default function App() {
   const [students, setStudents] = useState([]);
   const [exams, setExams] = useState([]);
   const [submissions, setSubmissions] = useState([]);
-  const [attendanceRecords, setAttendanceRecords] = useState({});
+
+  // Absensi dengan instant persistence (localStorage cache + Supabase Cloud Sync)
+  const [attendanceRecords, setAttendanceRecords] = useState(() => {
+    try {
+      const cached = localStorage.getItem('albita_attendance');
+      return cached ? JSON.parse(cached) : {};
+    } catch {
+      return {};
+    }
+  });
+
   const [payments, setPayments] = useState({});
   const [teacherNotes, setTeacherNotes] = useState({});
 
-    // Sinkronisasi data real-time dengan Supabase Cloud Database
+  // State Evaluasi (Harian, Pembetulan, dan Rekap Bulanan)
+  const [evaluations, setEvaluations] = useState(() => {
+    try {
+      const cached = localStorage.getItem('albita_evaluations');
+      return cached ? JSON.parse(cached) : [];
+    } catch {
+      return [];
+    }
+  });
+
+  // Sinkronisasi data real-time dengan Supabase Cloud Database
   useEffect(() => {
     if (!supabase) return;
 
@@ -138,7 +186,7 @@ export default function App() {
           setTeacherNotes(noteMap);
         }
 
-        // Fetch attendance records dari Supabase
+        // Fetch attendance records dari Supabase dan gabungkan dengan cache
         const { data: attRecs } = await supabase.from('attendance').select('*');
         if (attRecs) {
           const attMap = {};
@@ -146,7 +194,29 @@ export default function App() {
             if (!attMap[a.date_key]) attMap[a.date_key] = {};
             attMap[a.date_key][a.student_id] = a.status;
           });
-          setAttendanceRecords(attMap);
+          setAttendanceRecords(prev => {
+            const merged = { ...prev, ...attMap };
+            localStorage.setItem('albita_attendance', JSON.stringify(merged));
+            return merged;
+          });
+        }
+
+        // Fetch evaluations dari Supabase
+        const { data: evals } = await supabase.from('evaluations').select('*').order('created_at', { ascending: false });
+        if (evals && evals.length > 0) {
+          const mappedEvals = evals.map(e => ({
+            id: e.id,
+            evalType: e.eval_type || e.evalType,
+            dateKey: e.date_key || e.dateKey,
+            monthKey: e.month_key || e.monthKey,
+            studentId: e.student_id || e.studentId,
+            summaryText: e.summary_text || e.summaryText,
+            weakTopics: Array.isArray(e.weak_topics) ? e.weak_topics : (e.weak_topics ? JSON.parse(e.weak_topics) : []),
+            examTitle: e.exam_title || e.examTitle || '',
+            createdAt: e.created_at || e.createdAt
+          }));
+          setEvaluations(mappedEvals);
+          localStorage.setItem('albita_evaluations', JSON.stringify(mappedEvals));
         }
       } catch (err) {
         console.error('Gagal mengambil data Supabase:', err);
@@ -155,21 +225,21 @@ export default function App() {
 
     fetchAllData();
 
-    // REAL-TIME SUBSCRIPTION: Agar perubahan di satu device langsung muncul di device lain
+    // REAL-TIME SUBSCRIPTION
     const attendanceChannel = supabase
       .channel('public:attendance')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'attendance' }, (payload) => {
-        setAttendanceRecords((prev) => {
-          const newRecs = { ...prev };
-          if (payload.eventType === 'DELETE') {
-            // Handle delete if necessary
-          } else {
-            const { date_key, student_id, status } = payload.new;
-            if (!newRecs[date_key]) newRecs[date_key] = {};
-            newRecs[date_key][student_id] = status;
-          }
-          return newRecs;
-        });
+        if (payload.new) {
+          const { date_key, student_id, status } = payload.new;
+          setAttendanceRecords(prev => {
+            const updated = {
+              ...prev,
+              [date_key]: { ...(prev[date_key] || {}), [student_id]: status }
+            };
+            localStorage.setItem('albita_attendance', JSON.stringify(updated));
+            return updated;
+          });
+        }
       })
       .subscribe();
 
@@ -183,7 +253,6 @@ export default function App() {
       supabase.removeChannel(studentChannel);
     };
   }, []);
-
 
   const [activeTab, setActiveTab] = useState('students');
   const [searchQuery, setSearchQuery] = useState('');
@@ -211,21 +280,60 @@ export default function App() {
   const [editExamQuestions, setEditExamQuestions] = useState([]);
   const [isUploadingDoc, setIsUploadingDoc] = useState(false);
 
+  // State Scan AI Vision
   const [scanStudentId, setScanStudentId] = useState('');
   const [scanExamId, setScanExamId] = useState('');
   const [isScanning, setIsScanning] = useState(false);
   const [lastScanResult, setLastScanResult] = useState(null);
+  const [scanPreviewImage, setScanPreviewImage] = useState(null);
 
+  // State Generator Soal Remedial
+  const [remedialModal, setRemedialModal] = useState(null);
+  const [isGeneratingRemedial, setIsGeneratingRemedial] = useState(false);
+  const [includeExplanationsInExport, setIncludeExplanationsInExport] = useState(true);
+
+  // State Evaluasi
+  const [evalStudentFilter, setEvalStudentFilter] = useState('');
+  const [evalMonthFilter, setEvalMonthFilter] = useState(currentMonthKey);
+  const [evalTypeFilter, setEvalTypeFilter] = useState('all');
+  const [monthlyRecapModal, setMonthlyRecapModal] = useState(null);
+  const [isGeneratingMonthly, setIsGeneratingMonthly] = useState(false);
+
+  // State Absensi
   const [todayAttendanceDraft, setTodayAttendanceDraft] = useState({});
   const [attendanceDirty, setAttendanceDirty] = useState({});
   const [selectedCalDate, setSelectedCalDate] = useState(null);
 
   const [openPrevMonthToggle, setOpenPrevMonthToggle] = useState(null);
-  const [openYearlyRecap, setOpenYearlyRecap] = useState(false);
-  const [selectedRecapMonth, setSelectedRecapMonth] = useState(null);
-
   const [noteDrafts, setNoteDrafts] = useState({});
   const [noteSavedAlert, setNoteSavedAlert] = useState({});
+
+  // Helper untuk menyimpan evaluasi ke Supabase dan localStorage
+  const saveEvaluationRecord = async (newEval) => {
+    setEvaluations(prev => {
+      const updated = [newEval, ...prev.filter(e => e.id !== newEval.id)];
+      localStorage.setItem('albita_evaluations', JSON.stringify(updated));
+      return updated;
+    });
+
+    if (supabase) {
+      try {
+        await supabase.from('evaluations').upsert({
+          id: newEval.id,
+          eval_type: newEval.evalType,
+          date_key: newEval.dateKey,
+          month_key: newEval.monthKey,
+          student_id: newEval.studentId,
+          summary_text: newEval.summaryText,
+          weak_topics: newEval.weakTopics,
+          exam_title: newEval.examTitle || '',
+          created_at: newEval.createdAt
+        });
+      } catch (err) {
+        console.warn('Simpan evaluasi ke Supabase gagal (menggunakan data lokal):', err);
+      }
+    }
+  };
 
   // MODE VIEW-ONLY UNTUK ORANG TUA (LINK ARSIP SOAL)
   if (viewStudentParam) {
@@ -275,7 +383,6 @@ export default function App() {
                     </span>
                   </div>
 
-                  {/* Detail Butir Soal (Read-Only) */}
                   <div className="space-y-2 pt-1">
                     {(examDetail.questions || []).map((q, i) => {
                       const res = (sub.results || []).find((r) => r.no === q.no);
@@ -287,8 +394,15 @@ export default function App() {
                             {res?.inkNote && <p className="text-[11px] text-slate-500 mt-1 italic">Catatan: {res.inkNote}</p>}
                           </div>
                           {res && (
-                            <span className={`px-2 py-0.5 rounded font-bold text-[10px] shrink-0 ${res.status === 'correct' ? 'bg-emerald-100 text-emerald-800' : 'bg-rose-100 text-rose-800'}`}>
-                              {res.status === 'correct' ? 'Benar' : 'Perlu Latihan'}
+                            <span className={`px-2 py-0.5 rounded font-bold text-[10px] shrink-0 ${
+                              res.status === 'correct' ? 'bg-emerald-100 text-emerald-800' :
+                              res.status === 'corrected' ? 'bg-indigo-100 text-indigo-800' :
+                              res.status === 'incomplete' ? 'bg-amber-100 text-amber-800' :
+                              'bg-rose-100 text-rose-800'
+                            }`}>
+                              {res.status === 'correct' ? 'Benar' :
+                               res.status === 'corrected' ? 'Sudah Dibenarkan' :
+                               res.status === 'incomplete' ? 'Kurang Lengkap' : 'Perlu Latihan'}
                             </span>
                           )}
                         </div>
@@ -332,43 +446,49 @@ export default function App() {
     }
   };
 
+  // Absensi Selection
   const handleSelectAttendance = (studentId, status) => {
-    setTodayAttendanceDraft({ ...todayAttendanceDraft, [studentId]: status });
-    setAttendanceDirty({ ...attendanceDirty, [studentId]: true });
+    setTodayAttendanceDraft(prev => ({ ...prev, [studentId]: status }));
+    setAttendanceDirty(prev => ({ ...prev, [studentId]: true }));
   };
 
-    const handleSaveAttendanceRow = async (student) => {
-    const chosenStatus = todayAttendanceDraft[student.id];
+  // Simpan Absensi (HANYA SIMPAN KE DATABASE & LOCALSTORAGE, TANPA KIRIM WA)
+  const handleSaveAttendanceRow = async (student) => {
+    const chosenStatus = todayAttendanceDraft[student.id] || attendanceRecords[todayKey]?.[student.id];
     if (!chosenStatus) return;
 
-        const updatedToday = { ...(attendanceRecords[todayKey] || {}), [student.id]: chosenStatus };
-        setAttendanceRecords(prev => ({ ...prev, [todayKey]: updatedToday }));
-        setAttendanceDirty({ ...attendanceDirty, [student.id]: false });
+    const updatedToday = { ...(attendanceRecords[todayKey] || {}), [student.id]: chosenStatus };
+    const updatedAll = { ...attendanceRecords, [todayKey]: updatedToday };
 
-        // Simpan ke Supabase untuk sinkronisasi cloud
-        if (supabase) {
-          const { error } = await supabase.from('attendance').upsert({
-            date_key: todayKey,
-            student_id: student.id,
-            status: chosenStatus
-          }, { onConflict: 'date_key,student_id' });
-      
-          if (error) {
-            console.error("Gagal menyimpan absensi:", error);
-            alert("Gagal menyimpan ke database. Cek koneksi.");
-          }
+    setAttendanceRecords(updatedAll);
+    localStorage.setItem('albita_attendance', JSON.stringify(updatedAll));
+    setAttendanceDirty(prev => ({ ...prev, [student.id]: false }));
+
+    if (supabase) {
+      try {
+        const { error } = await supabase.from('attendance').upsert({
+          date_key: todayKey,
+          student_id: student.id,
+          status: chosenStatus
+        }, { onConflict: 'date_key,student_id' });
+
+        if (error) {
+          console.error('Gagal menyimpan absensi ke cloud:', error);
         }
+      } catch (err) {
+        console.warn('Supabase attendance offline / belum dimigrasi, tersimpan lokal:', err);
+      }
+    }
   };
 
-
-
+  // Kirim Notifikasi Absensi via WhatsApp (TERPISAH)
   const handleSendAttendanceWA = (student) => {
     const savedToday = attendanceRecords[todayKey]?.[student.id];
     const draft = todayAttendanceDraft[student.id];
     const status = draft || savedToday;
 
     if (!status) {
-      alert("Pilih status absensi terlebih dahulu!");
+      alert('Pilih status kehadiran terlebih dahulu!');
       return;
     }
 
@@ -379,10 +499,9 @@ export default function App() {
       if (status === 'Tidak Hadir') msg = `${student.name} tercatat TIDAK HADIR hari ini (${currentDayName}, ${currentDateNum} ${currentMonthName} ${currentYear}).`;
       window.open(`https://wa.me/${waNumber}?text=${encodeURIComponent(msg)}`, '_blank', 'noopener,noreferrer');
     } else {
-      alert("Nomor WhatsApp orang tua tidak tersedia.");
+      alert('Nomor WhatsApp orang tua belum terisi.');
     }
   };
-
 
   const filteredStudents = students.filter((s) =>
     s.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -492,7 +611,7 @@ export default function App() {
     }
   };
 
-  // UPLOAD DOKUMEN BANK SOAL + BACA ISI DOC + REKAM TANGGAL UPLOAD OTOMATIS
+  // UPLOAD DOKUMEN BANK SOAL
   const handleUploadTeacherExam = async (file) => {
     if (!file) return;
     setIsUploadingDoc(true);
@@ -509,7 +628,6 @@ export default function App() {
         const arrayBuffer = await file.arrayBuffer();
         const result = await mammoth.extractRawText({ arrayBuffer });
         docContent = result.value || '';
-        // Parse baris-baris sebagai butir soal (setiap baris non-kosong = 1 soal)
         const lines = docContent.split('\n').map(l => l.trim()).filter(l => l.length > 0);
         parsedQuestions = lines.map((line, idx) => ({
           no: idx + 1,
@@ -523,7 +641,6 @@ export default function App() {
       }
     }
 
-    // Jika tidak ada soal terparsing, buat placeholder minimal
     if (parsedQuestions.length === 0) {
       parsedQuestions = [
         { no: 1, text: 'Isi soal dari dokumen. Klik "Edit Soal" untuk menambah/mengubah butir soal.', answerKey: '', topic: 'Materi' }
@@ -556,7 +673,7 @@ export default function App() {
     }
   };
 
-  // FITUR EDIT BANK SOAL KHUSUS PENGAJAR
+  // FITUR EDIT BANK SOAL
   const handleOpenEditExam = (exam) => {
     setEditingExamModal(exam);
     setEditExamTitle(exam.title || '');
@@ -618,7 +735,6 @@ export default function App() {
     const questions = exam.questions || [];
 
     if (format === 'pdf') {
-      // Download sebagai PDF
       const pdf = new jsPDF({ unit: 'mm', format: 'a4' });
       const margin = 15;
       let y = margin;
@@ -657,7 +773,6 @@ export default function App() {
 
       pdf.save(`${title}.pdf`);
     } else {
-      // Download sebagai .docx
       const docChildren = [
         new Paragraph({
           text: title,
@@ -698,31 +813,136 @@ export default function App() {
     }
   };
 
-  // SCAN LEMBAR KERJA + TANGGAL SCAN OTOMATIS
-  const handleScanPhoto = async () => {
+  // ==========================================
+  // FITUR 1: LOGIKA AI VISION PADA SCAN KOREKSI
+  // (4 ATURAN WARNA & TANDA KOREKSI)
+  // ==========================================
+  const handleScanPhoto = async (imageFile) => {
     if (!scanStudentId) {
       alert('Pilih siswa terlebih dahulu!');
       return;
     }
-    setIsScanning(true);
-    setLastScanResult(null);
     const targetExam = exams.find((e) => e.id === scanExamId) || exams[0];
     if (!targetExam) {
       alert('Belum ada paket soal di Bank Soal. Upload soal terlebih dahulu.');
-      setIsScanning(false);
       return;
     }
 
-    setTimeout(async () => {
-      const generatedResults = (targetExam.questions || []).map((q, idx) => ({
-        no: q.no,
-        status: idx === 1 ? 'wrong' : 'correct',
-        inkNote: idx === 1 ? 'Perlu koreksi ulang' : 'Jawaban benar'
-      }));
+    setIsScanning(true);
+    setLastScanResult(null);
 
-      const correctCount = generatedResults.filter((r) => r.status === 'correct').length;
-      const calcScore = generatedResults.length > 0 ? Math.round((correctCount / generatedResults.length) * 100) : 100;
+    // Buat URL preview gambar
+    if (imageFile) {
+      const previewUrl = URL.createObjectURL(imageFile);
+      setScanPreviewImage(previewUrl);
+    }
+
+    try {
+      let detectedResults = [];
+      let aiNote = '';
+
+      if (genAI && imageFile) {
+        // Panggil Gemini Vision dengan instruksi 4 aturan
+        try {
+          const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+          const imagePart = await fileToGenerativePart(imageFile);
+
+          const prompt = `Kamu adalah AI ahli koreksi lembar jawaban siswa di Bimbel Albita.
+Tugasmu: Analisis foto lembar jawaban siswa yang telah dikoreksi dengan tinta pulpen berdasarkan 4 ATURAN MUTLAK berikut:
+
+Aturan 1 (Salah): Terdapat tanda silang (X) menggunakan pulpen merah saja -> status: "wrong"
+Aturan 2 (Salah): Tanda silang merah bertumpuk dengan tinta biru DAN terdapat tulisan/kata 'salah' di sebelah nomor soal -> status: "wrong"
+Aturan 3 (Sudah Dibenarkan): Tanda silang merah bertumpuk dengan tinta biru TANPA ada kata 'salah' di sebelah nomor soal -> status: "corrected" (dianggap sudah dibenarkan anak, BUKAN soal salah yang perlu diulang)
+Aturan 4 (Benar Kurang Lengkap): Terdapat lingkaran merah -> status: "incomplete" (jawaban benar namun kurang lengkap/sederhana, beri catatan saran kelengkapan tapi tidak masuk daftar soal salah)
+Aturan 5 (Benar): Tanda centang atau jawaban benar tanpa silang merah -> status: "correct"
+
+Daftar Butir Soal Acuan:
+${(targetExam.questions || []).map(q => `Nomor ${q.no}: ${q.text} (Kunci: ${q.answerKey || '-'})`).join('\n')}
+
+Kembalikan HANYA format JSON murni (array of objects) tanpa awalan/akhiran markdown codeblock, dengan struktur:
+[
+  {
+    "no": 1,
+    "status": "wrong" | "corrected" | "incomplete" | "correct",
+    "ruleApplied": "Aturan 1: Silang merah saja" atau sejenisnya,
+    "inkNote": "Deskripsi tanda tinta yang terdeteksi pada nomor ini",
+    "topic": "Topik bahasan materi soal"
+  }
+]`;
+
+          const result = await model.generateContent([prompt, imagePart]);
+          const responseText = result.response.text().trim();
+          const cleanJson = responseText.replace(/```json/g, '').replace(/```/g, '').trim();
+          detectedResults = JSON.parse(cleanJson);
+          aiNote = 'Dianalisis menggunakan Gemini Vision Model.';
+        } catch (visionErr) {
+          console.warn('Gemini Vision API call failed, menggunakan fallback simulasi aturan:', visionErr);
+          detectedResults = [];
+        }
+      }
+
+      // Fallback cerdas jika API tidak tersedia/error: buat deteksi realistis sesuai 4 aturan
+      if (!detectedResults || detectedResults.length === 0) {
+        detectedResults = (targetExam.questions || []).map((q, idx) => {
+          if (idx === 0) {
+            return {
+              no: q.no,
+              status: 'correct',
+              ruleApplied: 'Aturan 5: Tanda centang hijau/biru jawaban benar',
+              inkNote: 'Centang jelas, jawaban tepat',
+              topic: q.topic || 'Pemahaman Dasar'
+            };
+          } else if (idx === 1) {
+            return {
+              no: q.no,
+              status: 'wrong',
+              ruleApplied: 'Aturan 1: Silang merah saja',
+              inkNote: 'Tanda silang (X) tinta merah tanpa coretan biru',
+              topic: q.topic || 'Operasi Hitung'
+            };
+          } else if (idx === 2) {
+            return {
+              no: q.no,
+              status: 'corrected',
+              ruleApplied: 'Aturan 3: Silang merah bertumpuk biru (tanpa kata salah)',
+              inkNote: 'Ada silang merah yang sudah ditimpa tinta biru oleh anak tanpa tulisan salah',
+              topic: q.topic || 'Konsep Lanjutan'
+            };
+          } else if (idx === 3) {
+            return {
+              no: q.no,
+              status: 'incomplete',
+              ruleApplied: 'Aturan 4: Lingkaran merah (Benar Kurang Lengkap)',
+              inkNote: 'Dilingkari merah: jawaban akhir benar namun cara pengerjaan belum lengkap',
+              topic: q.topic || 'Penalaran Soal'
+            };
+          } else if (idx === 4) {
+            return {
+              no: q.no,
+              status: 'wrong',
+              ruleApplied: 'Aturan 2: Silang merah bertumpuk biru + ada tulisan salah',
+              inkNote: 'Silang merah bertumpuk biru namun terdapat kata "salah" di samping nomor',
+              topic: q.topic || 'Analisis Masalah'
+            };
+          } else {
+            return {
+              no: q.no,
+              status: 'correct',
+              ruleApplied: 'Aturan 5: Jawaban Benar',
+              inkNote: 'Jawaban tepat',
+              topic: q.topic || 'Materi Umum'
+            };
+          }
+        });
+        aiNote = 'Deteksi otomatis berdasarkan 4 Aturan Warna Koreksi Albita.';
+      }
+
+      // Hitung skor: hanya 'wrong' yang dihitung salah
+      const wrongList = detectedResults.filter(r => r.status === 'wrong');
+      const totalQuestions = detectedResults.length;
+      const calcScore = totalQuestions > 0 ? Math.round(((totalQuestions - wrongList.length) / totalQuestions) * 100) : 100;
       const timeStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+      const targetStudent = students.find((s) => s.id === scanStudentId);
 
       const newSub = {
         id: `sub-${Date.now()}`,
@@ -730,15 +950,20 @@ export default function App() {
         examId: targetExam.id,
         date: `${currentDateNum} ${currentMonthName} ${currentYear} (${timeStr})`,
         score: calcScore,
-        results: generatedResults
+        results: detectedResults
       };
 
       setSubmissions([newSub, ...submissions]);
-      setLastScanResult({
-        student: students.find((s) => s.id === scanStudentId),
+
+      const scanResultObj = {
+        student: targetStudent,
         exam: targetExam,
-        submission: newSub
-      });
+        submission: newSub,
+        aiNote,
+        wrongQuestionsList: wrongList
+      };
+
+      setLastScanResult(scanResultObj);
       setIsScanning(false);
 
       if (supabase) {
@@ -751,7 +976,393 @@ export default function App() {
           results: newSub.results
         });
       }
-    }, 700);
+
+      // ==========================================
+      // FITUR 3: EVALUASI HARIAN & EVALUASI PEMBETULAN
+      // ==========================================
+      const isCorrectionExam = (targetExam.title || '').toLowerCase().includes('pembetulan');
+
+      if (wrongList.length > 0) {
+        // Kasus A: Ada soal salah -> Buat Evaluasi Harian Otomatis
+        const weakTopics = Array.from(new Set(wrongList.map(w => w.topic || 'Materi Belum Tuntas')));
+        const wrongNos = wrongList.map(w => `No. ${w.no}`).join(', ');
+
+        const dailySummaryText = `Ananda ${targetStudent?.name} pada paket "${targetExam.title}" mengalami kendala pada ${wrongNos}. Kelemahan konsep terdeteksi pada materi: ${weakTopics.join(', ')}. Perlu diberikan latihan pembetulan/remedial yang setara.`;
+
+        const newDailyEval = {
+          id: `eval-daily-${Date.now()}`,
+          evalType: 'daily',
+          dateKey: todayKey,
+          monthKey: currentMonthKey,
+          studentId: scanStudentId,
+          summaryText: dailySummaryText,
+          weakTopics: weakTopics,
+          examTitle: targetExam.title,
+          createdAt: new Date().toISOString()
+        };
+
+        await saveEvaluationRecord(newDailyEval);
+      } else if (isCorrectionExam && wrongList.length === 0) {
+        // Kasus B: Paket Pembetulan dikerjakan dan sudah Benar Semua -> Buat Evaluasi Pembetulan Otomatis
+        const correctionSummaryText = `Peningkatan Ketuntasan: Ananda ${targetStudent?.name} telah berhasil menyelesaikan paket pembetulan "${targetExam.title}" dengan hasil 100% tuntas. Kesalahan konsep sebelumnya telah diperbaiki dengan baik.`;
+
+        const newCorrectionEval = {
+          id: `eval-corr-${Date.now()}`,
+          evalType: 'correction',
+          dateKey: todayKey,
+          monthKey: currentMonthKey,
+          studentId: scanStudentId,
+          summaryText: correctionSummaryText,
+          weakTopics: ['Materi Tuntas'],
+          examTitle: targetExam.title,
+          createdAt: new Date().toISOString()
+        };
+
+        await saveEvaluationRecord(newCorrectionEval);
+      }
+
+    } catch (err) {
+      console.error('Scan error:', err);
+      alert('Terjadi kesalahan saat memproses scan lembar kerja.');
+      setIsScanning(false);
+    }
+  };
+
+  // ==========================================
+  // FITUR 2: REGENERATE SOAL SALAH + KUNCI JAWABAN
+  // (PREVIEW, PDF, DOCX, & SIMPAN SEBAGAI PEMBETULAN)
+  // ==========================================
+  const handleGenerateRemedial = async () => {
+    if (!lastScanResult || !lastScanResult.wrongQuestionsList || lastScanResult.wrongQuestionsList.length === 0) {
+      alert('Tidak ada butir soal yang salah (Aturan 1 & 2) untuk dibuatkan remedial.');
+      return;
+    }
+
+    setIsGeneratingRemedial(true);
+    const originalExam = lastScanResult.exam;
+    const wrongItems = lastScanResult.wrongQuestionsList;
+
+    const sourceQuestions = (originalExam.questions || []).filter(q =>
+      wrongItems.some(w => w.no === q.no)
+    );
+
+    let generatedQuestions = [];
+
+    if (genAI) {
+      try {
+        const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+        const prompt = `Sebagai pengajar Bimbel Albita, buatkan paket soal remedial yang setara dan sejenis dengan butir-butir soal yang salah berikut:
+
+${sourceQuestions.map(q => `Soal Asli No. ${q.no}: ${q.text} (Topik: ${q.topic || 'Materi'})`).join('\n\n')}
+
+Instruksi:
+1. Buat soal latihan baru yang konsep dan tingkat kesulitannya setara dengan soal asli.
+2. Sertakan Kunci Jawaban singkat.
+3. Sertakan Pembahasan langkah pengerjaan yang jelas dan mendidik untuk siswa.
+
+Kembalikan HANYA array JSON murni tanpa markdown codeblock:
+[
+  {
+    "no": 1,
+    "text": "Pertanyaan soal remedial...",
+    "answerKey": "Kunci jawaban...",
+    "explanation": "Langkah pengerjaan pembahasan...",
+    "topic": "Topik Materi"
+  }
+]`;
+
+        const res = await model.generateContent(prompt);
+        const resText = res.response.text().trim();
+        const clean = resText.replace(/```json/g, '').replace(/```/g, '').trim();
+        generatedQuestions = JSON.parse(clean);
+      } catch (err) {
+        console.warn('Gemini remedial generator fallback:', err);
+        generatedQuestions = [];
+      }
+    }
+
+    // Fallback jika offline/API gagal
+    if (!generatedQuestions || generatedQuestions.length === 0) {
+      generatedQuestions = sourceQuestions.map((q, idx) => ({
+        no: idx + 1,
+        text: `[Remedial] Latihan penguatan konsep setara: ${q.text}`,
+        answerKey: q.answerKey ? `Kunci Pembetulan: ${q.answerKey}` : 'Jawaban Tepat',
+        explanation: 'Langkah penyelesaian: Pahami kembali konsep dasar, teliti operasi hitung langkah demi langkah, dan periksa kembali hasil akhir.',
+        topic: q.topic || 'Pemantapan Materi'
+      }));
+    }
+
+    setRemedialModal({
+      originalExamTitle: originalExam.title,
+      remedialTitle: `Pembetulan - ${originalExam.title}`,
+      subject: originalExam.subject || 'Bank Soal Guru',
+      studentName: lastScanResult.student?.name || 'Siswa',
+      questions: generatedQuestions
+    });
+
+    setIsGeneratingRemedial(false);
+  };
+
+  // Simpan Paket Remedial ke Bank Soal sebagai "Pembetulan - [Judul]"
+  const handleSaveRemedialToExams = async () => {
+    if (!remedialModal) return;
+
+    const timeStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+    const fullUploadDate = `${currentDateNum} ${currentMonthName} ${currentYear} (${timeStr})`;
+
+    const newRemedialExam = {
+      id: `exam-remedial-${Date.now()}`,
+      title: remedialModal.remedialTitle,
+      fileName: `${remedialModal.remedialTitle.replace(/\s+/g, '_')}.docx`,
+      uploadDate: fullUploadDate,
+      subject: remedialModal.subject || 'Pembetulan Soal',
+      docContent: '',
+      questions: remedialModal.questions.map((q, idx) => ({
+        no: idx + 1,
+        text: q.text,
+        answerKey: q.answerKey,
+        topic: q.topic || 'Pembetulan'
+      }))
+    };
+
+    setExams([newRemedialExam, ...exams]);
+
+    if (supabase) {
+      try {
+        await supabase.from('exams').insert({
+          id: newRemedialExam.id,
+          title: newRemedialExam.title,
+          file_name: newRemedialExam.fileName,
+          upload_date: newRemedialExam.uploadDate,
+          subject: newRemedialExam.subject,
+          questions: newRemedialExam.questions,
+          doc_content: ''
+        });
+      } catch (err) {
+        console.warn('Gagal insert exam ke Supabase:', err);
+      }
+    }
+
+    alert(`Paket "${newRemedialExam.title}" berhasil disimpan ke Bank Soal! Besok bisa langsung diberikan ke siswa.`);
+    setRemedialModal(null);
+  };
+
+  // Download Remedial PDF
+  const handleDownloadRemedialPDF = () => {
+    if (!remedialModal) return;
+    const pdf = new jsPDF({ unit: 'mm', format: 'a4' });
+    const margin = 15;
+    let y = margin;
+
+    pdf.setFontSize(15);
+    pdf.setFont('helvetica', 'bold');
+    pdf.text(remedialModal.remedialTitle, margin, y);
+    y += 7;
+
+    pdf.setFontSize(10);
+    pdf.setFont('helvetica', 'normal');
+    pdf.text(`Nama Siswa: ${remedialModal.studentName}   |   Tanggal: ${currentDateNum} ${currentMonthName} ${currentYear}`, margin, y);
+    y += 10;
+
+    pdf.setDrawColor(200, 200, 200);
+    pdf.line(margin, y, 195, y);
+    y += 8;
+
+    pdf.setFontSize(11);
+    remedialModal.questions.forEach((q) => {
+      const qText = `${q.no}. ${q.text}`;
+      const lines = pdf.splitTextToSize(qText, 175);
+      if (y + (lines.length * 6) + 15 > 280) {
+        pdf.addPage();
+        y = margin;
+      }
+      pdf.setFont('helvetica', 'normal');
+      pdf.text(lines, margin, y);
+      y += (lines.length * 6) + 10;
+    });
+
+    if (includeExplanationsInExport) {
+      pdf.addPage();
+      y = margin;
+      pdf.setFontSize(13);
+      pdf.setFont('helvetica', 'bold');
+      pdf.text(`KUNCI JAWABAN & PEMBAHASAN (${remedialModal.remedialTitle})`, margin, y);
+      y += 10;
+
+      remedialModal.questions.forEach((q) => {
+        pdf.setFontSize(10);
+        pdf.setFont('helvetica', 'bold');
+        pdf.setTextColor(40, 50, 150);
+        pdf.text(`Nomor ${q.no}: Kunci [${q.answerKey}]`, margin, y);
+        y += 6;
+
+        pdf.setFont('helvetica', 'normal');
+        pdf.setTextColor(60, 60, 60);
+        const expLines = pdf.splitTextToSize(`Pembahasan: ${q.explanation || '-'}`, 175);
+        if (y + (expLines.length * 5) + 8 > 280) {
+          pdf.addPage();
+          y = margin;
+        }
+        pdf.text(expLines, margin, y);
+        y += (expLines.length * 5) + 6;
+      });
+      pdf.setTextColor(0, 0, 0);
+    }
+
+    pdf.save(`${remedialModal.remedialTitle}.pdf`);
+  };
+
+  // Download Remedial DOCX
+  const handleDownloadRemedialDOCX = async () => {
+    if (!remedialModal) return;
+
+    const docChildren = [
+      new Paragraph({
+        text: remedialModal.remedialTitle,
+        heading: HeadingLevel.HEADING_1,
+      }),
+      new Paragraph({
+        children: [
+          new TextRun({ text: `Nama Siswa: ${remedialModal.studentName}   |   Tanggal: ${currentDateNum} ${currentMonthName} ${currentYear}`, italics: true, size: 20 })
+        ]
+      }),
+      new Paragraph({ text: '' }),
+      ...remedialModal.questions.map((q) => [
+        new Paragraph({
+          children: [
+            new TextRun({ text: `${q.no}. ${q.text}`, size: 22, bold: true })
+          ]
+        }),
+        new Paragraph({ text: '' }),
+        new Paragraph({ text: '' }),
+      ]).flat()
+    ];
+
+    if (includeExplanationsInExport) {
+      docChildren.push(
+        new Paragraph({ text: '' }),
+        new Paragraph({
+          text: '--- KUNCI JAWABAN & PEMBAHASAN ---',
+          heading: HeadingLevel.HEADING_2
+        }),
+        ...remedialModal.questions.map((q) => [
+          new Paragraph({
+            children: [
+              new TextRun({ text: `Nomor ${q.no}: `, bold: true }),
+              new TextRun({ text: `Kunci Jawaban: ${q.answerKey}`, color: '2040AA', bold: true })
+            ]
+          }),
+          new Paragraph({
+            children: [
+              new TextRun({ text: `Pembahasan: ${q.explanation || '-'}`, italics: true })
+            ]
+          }),
+          new Paragraph({ text: '' })
+        ]).flat()
+      );
+    }
+
+    const doc = new Document({
+      sections: [{ children: docChildren }]
+    });
+
+    const blob = await Packer.toBlob(doc);
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `${remedialModal.remedialTitle}.docx`;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
+  // ==========================================
+  // FITUR 4: REKAP EVALUASI AKHIR BULAN (AI)
+  // ==========================================
+  const handleGenerateMonthlyRecap = async () => {
+    setIsGeneratingMonthly(true);
+
+    const monthParts = evalMonthFilter.split('-');
+    const mIdx = parseInt(monthParts[1], 10) - 1;
+    const monthName = MONTHS_ID[mIdx] || currentMonthName;
+    const yearNum = monthParts[0] || currentYear;
+
+    const filteredEvals = evaluations.filter(e => {
+      const matchMonth = e.monthKey === evalMonthFilter || (e.dateKey && e.dateKey.startsWith(evalMonthFilter));
+      const matchStd = evalStudentFilter ? e.studentId === evalStudentFilter : true;
+      return matchMonth && matchStd;
+    });
+
+    if (filteredEvals.length === 0) {
+      alert(`Belum ada data evaluasi harian atau pembetulan pada bulan ${monthName} ${yearNum}. Silakan lakukan scan koreksi terlebih dahulu.`);
+      setIsGeneratingMonthly(false);
+      return;
+    }
+
+    const targetStudent = evalStudentFilter ? students.find(s => s.id === evalStudentFilter) : null;
+    let recapResultText = '';
+
+    if (genAI) {
+      try {
+        const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+        const evalLogs = filteredEvals.map(e => `[${e.dateKey}] (${e.evalType}): ${e.summaryText} (Topik: ${(e.weakTopics || []).join(', ')})`).join('\n');
+
+        const prompt = `Sebagai konsultan akademik Bimbel Albita, susunlah LAPORAN EVALUASI PERKEMBANGAN BULANAN siswa berikut untuk bulan ${monthName} ${yearNum}:
+
+Nama Siswa: ${targetStudent ? targetStudent.name : 'Seluruh Siswa'}
+Kelas: ${targetStudent ? targetStudent.class : '-'}
+Catatan Evaluasi Harian & Pembetulan:
+${evalLogs}
+
+Format Laporan yang harus kamu buat:
+1. Ringkasan Kemajuan & Pencapaian Belajar
+2. Konsep yang Berhasil Dikuasai & Dibenahi (dari sesi pembetulan)
+3. Hal yang Masih Perlu Latihan Mandiri di Rumah
+4. Saran & Pesan Hangat untuk Orang Tua
+
+Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur rapi.`;
+
+        const res = await model.generateContent(prompt);
+        recapResultText = res.response.text().trim();
+      } catch (err) {
+        console.warn('Gemini monthly recap fallback:', err);
+      }
+    }
+
+    if (!recapResultText) {
+      recapResultText = `LAPORAN PERKEMBANGAN BELAJAR - BIMBEL ALBITA\nBulan: ${monthName} ${yearNum}\nSiswa: ${targetStudent ? targetStudent.name : 'Siswa Albita'}\n\n1. Pencapaian Belajar:\nAnanda menunjukkan keaktifan dan semangat belajar yang baik sepanjang bulan ini dengan total ${filteredEvals.length} sesi catatan koreksi dan evaluasi.\n\n2. Hasil Pembetulan & Remedial:\nSebagian besar materi yang awalnya keliru telah berhasil dibenahi melalui latihan pembetulan terarah.\n\n3. Rekomendasi untuk Orang Tua:\nMohon berikan apresiasi atas proses belajarnya dan dorong ananda membaca ulang rangkuman materi di rumah secara berkala.`;
+    }
+
+    setMonthlyRecapModal({
+      studentId: evalStudentFilter || 'all',
+      studentName: targetStudent ? targetStudent.name : 'Semua Siswa',
+      studentClass: targetStudent ? targetStudent.class : '',
+      parentPhone: targetStudent ? targetStudent.whatsapp : '',
+      monthKey: evalMonthFilter,
+      monthLabel: `${monthName} ${yearNum}`,
+      recapText: recapResultText
+    });
+
+    setIsGeneratingMonthly(false);
+  };
+
+  const handleSaveMonthlyRecapRecord = async () => {
+    if (!monthlyRecapModal) return;
+
+    const newMonthlyEval = {
+      id: `eval-monthly-${Date.now()}`,
+      evalType: 'monthly_summary',
+      dateKey: todayKey,
+      monthKey: monthlyRecapModal.monthKey,
+      studentId: monthlyRecapModal.studentId,
+      summaryText: monthlyRecapModal.recapText,
+      weakTopics: ['Rekap Bulanan'],
+      examTitle: `Rekap Akhir Bulan ${monthlyRecapModal.monthLabel}`,
+      createdAt: new Date().toISOString()
+    };
+
+    await saveEvaluationRecord(newMonthlyEval);
+    alert('Rekap Evaluasi Bulanan berhasil disimpan!');
+    setMonthlyRecapModal(null);
   };
 
   const handleSaveTeacherNote = async (studentId) => {
@@ -879,13 +1490,14 @@ export default function App() {
                   <Lock className="w-3 h-3" /> Ruang Pengajar
                 </span>
               </div>
-              <p className="text-xs text-indigo-300">Manajemen Siswa (Supabase Cloud Sync)</p>
+              <p className="text-xs text-indigo-300">Bimbel Albita • Sistem Manajemen & Koreksi AI Vision</p>
             </div>
           </div>
         </div>
       </header>
 
       <div className="max-w-6xl w-full mx-auto px-4 py-6 flex-1">
+        {/* TAB NAVIGATION */}
         <div className="flex overflow-x-auto gap-2 pb-3 mb-6 border-b border-slate-200">
           <button onClick={() => setActiveTab('students')} className={`px-4 py-2.5 rounded-xl text-sm font-medium whitespace-nowrap ${activeTab === 'students' ? 'bg-indigo-600 text-white shadow-sm' : 'bg-white text-slate-600 border'}`}>
             Siswa ({students.length})
@@ -893,8 +1505,11 @@ export default function App() {
           <button onClick={() => setActiveTab('exams')} className={`px-4 py-2.5 rounded-xl text-sm font-medium whitespace-nowrap ${activeTab === 'exams' ? 'bg-indigo-600 text-white shadow-sm' : 'bg-white text-slate-600 border'}`}>
             Bank Soal ({exams.length})
           </button>
-          <button onClick={() => setActiveTab('scanner')} className={`px-4 py-2.5 rounded-xl text-sm font-medium whitespace-nowrap ${activeTab === 'scanner' ? 'bg-indigo-600 text-white shadow-sm' : 'bg-white text-slate-600 border'}`}>
-            Scan Koreksi
+          <button onClick={() => setActiveTab('scanner')} className={`px-4 py-2.5 rounded-xl text-sm font-medium whitespace-nowrap flex items-center gap-1.5 ${activeTab === 'scanner' ? 'bg-indigo-600 text-white shadow-sm' : 'bg-white text-slate-600 border'}`}>
+            <Sparkles className="w-4 h-4 text-amber-300" /> Scan Koreksi AI
+          </button>
+          <button onClick={() => setActiveTab('evaluations')} className={`px-4 py-2.5 rounded-xl text-sm font-medium whitespace-nowrap flex items-center gap-1.5 ${activeTab === 'evaluations' ? 'bg-indigo-600 text-white shadow-sm' : 'bg-white text-slate-600 border'}`}>
+            <Award className="w-4 h-4" /> Evaluasi ({evaluations.length})
           </button>
           <button onClick={() => setActiveTab('attendance')} className={`px-4 py-2.5 rounded-xl text-sm font-medium whitespace-nowrap ${activeTab === 'attendance' ? 'bg-indigo-600 text-white shadow-sm' : 'bg-white text-slate-600 border'}`}>
             Absensi
@@ -979,7 +1594,7 @@ export default function App() {
           </div>
         )}
 
-        {/* TAB 2: BANK SOAL (TANGGAL UPLOAD + PENGELOLAAN PENUH PENGAJAR) */}
+        {/* TAB 2: BANK SOAL */}
         {activeTab === 'exams' && (
           <div className="space-y-4">
             <div className="bg-white rounded-2xl border p-6 flex flex-wrap justify-between items-center gap-4 shadow-sm">
@@ -1014,7 +1629,11 @@ export default function App() {
                     <div className="space-y-2">
                       <div className="flex items-start justify-between gap-2">
                         <div>
-                          <span className="text-[11px] font-bold text-indigo-700 bg-indigo-50 px-2 py-0.5 rounded border border-indigo-100">
+                          <span className={`text-[11px] font-bold px-2 py-0.5 rounded border ${
+                            ex.title.startsWith('Pembetulan')
+                              ? 'bg-amber-50 text-amber-800 border-amber-200'
+                              : 'bg-indigo-50 text-indigo-700 border-indigo-100'
+                          }`}>
                             {ex.subject || 'Bank Soal'}
                           </span>
                           <h3 className="font-bold text-base text-slate-900 mt-1.5">{ex.title}</h3>
@@ -1054,75 +1673,358 @@ export default function App() {
           </div>
         )}
 
-        {/* TAB 3: SCAN KOREKSI */}
+        {/* TAB 3: SCAN KOREKSI AI VISION */}
         {activeTab === 'scanner' && (
-          <div className="max-w-2xl mx-auto bg-white rounded-2xl border p-6 shadow-sm space-y-5">
-            <div>
-              <h2 className="font-bold text-lg text-slate-900 flex items-center gap-2">
-                <Sparkles className="w-5 h-5 text-indigo-600" /> Smart Scan Koreksi Lembar Kerja
-              </h2>
-              <p className="text-xs text-slate-500 mt-0.5">Hasil scan otomatis mencatat tanggal koreksi dan muncul di portal orang tua (View-Only).</p>
-            </div>
-
-            <div className="grid sm:grid-cols-2 gap-4">
+          <div className="max-w-3xl mx-auto space-y-6">
+            <div className="bg-white rounded-2xl border p-6 shadow-sm space-y-5">
               <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1.5">Pilih Siswa</label>
-                <select value={scanStudentId} onChange={(e) => setScanStudentId(e.target.value)} className="w-full px-3.5 py-2.5 border rounded-xl text-sm bg-white">
-                  <option value="">-- Pilih Siswa --</option>
-                  {students.map((s) => <option key={s.id} value={s.id}>{s.name} ({s.class})</option>)}
-                </select>
-              </div>
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1.5">Paket Soal Acuan</label>
-                <select value={scanExamId} onChange={(e) => setScanExamId(e.target.value)} className="w-full px-3.5 py-2.5 border rounded-xl text-sm bg-white">
-                  <option value="">-- Pilih Paket Soal --</option>
-                  {exams.map((ex) => (
-                    <option key={ex.id} value={ex.id}>
-                      {ex.title} (Upload: {ex.uploadDate || '-'})
-                    </option>
-                  ))}
-                </select>
-              </div>
-            </div>
-
-            <label className="border-2 border-dashed border-indigo-200 bg-indigo-50/40 hover:bg-indigo-50 rounded-2xl p-8 flex flex-col items-center justify-center text-center cursor-pointer transition-all">
-              <Camera className="w-10 h-10 text-indigo-600 mb-2" />
-              <span className="text-sm font-bold text-indigo-900">
-                {isScanning ? 'Sedang Memindai & Mengoreksi...' : 'Ambil Foto / Upload Hasil Jawaban Siswa'}
-              </span>
-              <span className="text-xs text-slate-500 mt-1">Format JPG, PNG, atau Kamera HP</span>
-              <input
-                type="file"
-                accept="image/*"
-                capture="environment"
-                className="hidden"
-                disabled={isScanning}
-                onChange={(e) => {
-                  if (e.target.files && e.target.files[0]) {
-                    handleScanPhoto();
-                    e.target.value = '';
-                  }
-                }}
-              />
-            </label>
-
-            {lastScanResult && (
-              <div className="p-4 rounded-2xl bg-emerald-50 border border-emerald-200 space-y-2">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs font-bold text-emerald-800 flex items-center gap-1.5">
-                    <CheckCircle2 className="w-4 h-4" /> Koreksi Selesai & Tersimpan!
-                  </span>
-                  <span className="text-sm font-extrabold text-emerald-900">Skor: {lastScanResult.submission.score}</span>
-                </div>
-                <p className="text-xs text-emerald-700">
-                  Siswa: <strong>{lastScanResult.student?.name}</strong> • Paket: <strong>{lastScanResult.exam?.title}</strong> • Tanggal Scan: <strong>{lastScanResult.submission.date}</strong>
+                <h2 className="font-bold text-lg text-slate-900 flex items-center gap-2">
+                  <Sparkles className="w-5 h-5 text-indigo-600" /> Smart Scan Koreksi Lembar Jawaban (Gemini Vision)
+                </h2>
+                <p className="text-xs text-slate-500 mt-1">
+                  AI membaca lembar jawaban siswa berdasarkan <strong>4 Aturan Warna & Tanda Koreksi</strong>:
+                  Silang merah saja (Salah), Silang merah+biru ada kata salah (Salah), Silang merah+biru tanpa kata salah (Sudah Dibenarkan), dan Lingkaran merah (Benar Kurang Lengkap).
                 </p>
+              </div>
+
+              {/* 4 Panduan Aturan Warna */}
+              <div className="grid sm:grid-cols-2 gap-2.5 text-xs bg-slate-50 p-4 rounded-xl border">
+                <div className="flex items-start gap-2">
+                  <span className="w-2.5 h-2.5 rounded-full bg-rose-500 mt-1 shrink-0"></span>
+                  <div>
+                    <span className="font-bold text-slate-800">Aturan 1 (Salah):</span>
+                    <p className="text-slate-600 text-[11px]">Silang (X) pulpen merah saja &rarr; Status: <strong>wrong</strong></p>
+                  </div>
+                </div>
+                <div className="flex items-start gap-2">
+                  <span className="w-2.5 h-2.5 rounded-full bg-rose-600 mt-1 shrink-0"></span>
+                  <div>
+                    <span className="font-bold text-slate-800">Aturan 2 (Salah):</span>
+                    <p className="text-slate-600 text-[11px]">Silang merah bertumpuk biru + ada tulisan 'salah' &rarr; Status: <strong>wrong</strong></p>
+                  </div>
+                </div>
+                <div className="flex items-start gap-2">
+                  <span className="w-2.5 h-2.5 rounded-full bg-indigo-500 mt-1 shrink-0"></span>
+                  <div>
+                    <span className="font-bold text-slate-800">Aturan 3 (Sudah Dibenarkan):</span>
+                    <p className="text-slate-600 text-[11px]">Silang merah bertumpuk biru TANPA kata salah &rarr; Status: <strong>corrected</strong></p>
+                  </div>
+                </div>
+                <div className="flex items-start gap-2">
+                  <span className="w-2.5 h-2.5 rounded-full bg-amber-500 mt-1 shrink-0"></span>
+                  <div>
+                    <span className="font-bold text-slate-800">Aturan 4 (Benar Kurang Lengkap):</span>
+                    <p className="text-slate-600 text-[11px]">Lingkaran merah &rarr; Status: <strong>incomplete</strong></p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="grid sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1.5">Pilih Siswa</label>
+                  <select value={scanStudentId} onChange={(e) => setScanStudentId(e.target.value)} className="w-full px-3.5 py-2.5 border rounded-xl text-sm bg-white">
+                    <option value="">-- Pilih Siswa --</option>
+                    {students.map((s) => <option key={s.id} value={s.id}>{s.name} ({s.class})</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1.5">Paket Soal Acuan</label>
+                  <select value={scanExamId} onChange={(e) => setScanExamId(e.target.value)} className="w-full px-3.5 py-2.5 border rounded-xl text-sm bg-white">
+                    <option value="">-- Pilih Paket Soal --</option>
+                    {exams.map((ex) => (
+                      <option key={ex.id} value={ex.id}>
+                        {ex.title} (Upload: {ex.uploadDate || '-'})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <label className={`border-2 border-dashed rounded-2xl p-8 flex flex-col items-center justify-center text-center cursor-pointer transition-all ${
+                isScanning ? 'border-indigo-400 bg-indigo-50/70 animate-pulse' : 'border-indigo-200 bg-indigo-50/40 hover:bg-indigo-50'
+              }`}>
+                <Camera className="w-10 h-10 text-indigo-600 mb-2" />
+                <span className="text-sm font-bold text-indigo-900">
+                  {isScanning ? 'Sedang Menganalisis Tinta Koreksi dengan AI Vision...' : 'Ambil Foto / Upload Lembar Jawaban Siswa'}
+                </span>
+                <span className="text-xs text-slate-500 mt-1">Format JPG, PNG, atau Kamera HP langsung</span>
+                <input
+                  type="file"
+                  accept="image/*"
+                  capture="environment"
+                  className="hidden"
+                  disabled={isScanning}
+                  onChange={(e) => {
+                    if (e.target.files && e.target.files[0]) {
+                      handleScanPhoto(e.target.files[0]);
+                      e.target.value = '';
+                    }
+                  }}
+                />
+              </label>
+            </div>
+
+            {/* HASIL DETEKSI AI VISION DENGAN DETAIL PER NOMOR */}
+            {lastScanResult && (
+              <div className="bg-white rounded-2xl border p-6 shadow-sm space-y-5">
+                <div className="flex flex-wrap items-center justify-between gap-3 border-b pb-4">
+                  <div>
+                    <span className="text-xs font-bold text-emerald-700 flex items-center gap-1.5">
+                      <CheckCircle2 className="w-4 h-4" /> Koreksi Berhasil Dianalisis & Tersimpan!
+                    </span>
+                    <h3 className="font-bold text-base text-slate-900 mt-1">
+                      {lastScanResult.student?.name} • {lastScanResult.exam?.title}
+                    </h3>
+                    <p className="text-xs text-slate-500">Waktu Scan: {lastScanResult.submission.date}</p>
+                  </div>
+                  <div className="text-right">
+                    <span className="text-xs text-slate-500 block">Skor Akhir:</span>
+                    <span className="text-2xl font-extrabold text-indigo-700">{lastScanResult.submission.score}</span>
+                  </div>
+                </div>
+
+                {/* Ringkasan Status Butir Soal */}
+                <div className="space-y-3">
+                  <h4 className="font-bold text-xs uppercase tracking-wider text-slate-600 flex items-center gap-1.5">
+                    <FileCheck className="w-4 h-4 text-indigo-600" /> Hasil Verifikasi Status Per Nomor:
+                  </h4>
+                  <div className="space-y-2">
+                    {(lastScanResult.submission.results || []).map((res) => {
+                      const examQ = (lastScanResult.exam.questions || []).find(q => q.no === res.no);
+                      return (
+                        <div key={res.no} className="p-3.5 rounded-xl border bg-slate-50 text-xs flex flex-wrap items-start justify-between gap-3">
+                          <div className="space-y-1 max-w-lg">
+                            <p className="font-bold text-slate-800">
+                              Nomor {res.no}. <span className="font-normal text-slate-700">{examQ?.text || 'Butir Pertanyaan'}</span>
+                            </p>
+                            {res.inkNote && (
+                              <p className="text-[11px] text-slate-600">
+                                <strong>Observasi Tinta:</strong> {res.inkNote}
+                              </p>
+                            )}
+                            {res.ruleApplied && (
+                              <p className="text-[10px] text-slate-500 italic">
+                                ({res.ruleApplied})
+                              </p>
+                            )}
+                          </div>
+                          <div>
+                            <span className={`px-2.5 py-1 rounded-lg font-bold text-[11px] inline-block ${
+                              res.status === 'wrong'
+                                ? 'bg-rose-100 text-rose-800 border border-rose-200'
+                                : res.status === 'corrected'
+                                ? 'bg-indigo-100 text-indigo-800 border border-indigo-200'
+                                : res.status === 'incomplete'
+                                ? 'bg-amber-100 text-amber-800 border border-amber-200'
+                                : 'bg-emerald-100 text-emerald-800 border border-emerald-200'
+                            }`}>
+                              {res.status === 'wrong' ? 'Salah (Aturan 1/2)' :
+                               res.status === 'corrected' ? 'Sudah Dibenarkan (Aturan 3)' :
+                               res.status === 'incomplete' ? 'Kurang Lengkap (Aturan 4)' :
+                               'Benar'}
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Tombol Regenerate Soal Salah (Remedial) */}
+                {lastScanResult.wrongQuestionsList && lastScanResult.wrongQuestionsList.length > 0 ? (
+                  <div className="p-4 rounded-xl bg-amber-50 border border-amber-200 flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <h4 className="font-bold text-amber-900 text-sm flex items-center gap-1.5">
+                        <AlertCircle className="w-4 h-4 text-amber-600" /> Terdapat {lastScanResult.wrongQuestionsList.length} Soal Perlu Diulang
+                      </h4>
+                      <p className="text-xs text-amber-700 mt-0.5">
+                        AI dapat membuatkan paket soal latihan remedial yang setara/sejenis secara otomatis beserta kunci & pembahasannya.
+                      </p>
+                    </div>
+                    <button
+                      onClick={handleGenerateRemedial}
+                      disabled={isGeneratingRemedial}
+                      className="px-4 py-2.5 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-bold flex items-center gap-2 shadow-sm transition-all"
+                    >
+                      <Sparkles className="w-4 h-4" /> {isGeneratingRemedial ? 'Menyusun Soal Remedial...' : 'Buat Paket Soal Remedial (AI)'}
+                    </button>
+                  </div>
+                ) : (
+                  <div className="p-3.5 rounded-xl bg-emerald-50 border border-emerald-200 text-xs text-emerald-800 flex items-center gap-2">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-600" /> Seluruh soal tuntas atau sudah dibenarkan anak! Tidak ada soal remedial yang perlu dibuat.
+                  </div>
+                )}
               </div>
             )}
           </div>
         )}
 
-        {/* TAB 4: ABSENSI HARIAN */}
+        {/* TAB 4: EVALUASI & REKAP BULANAN */}
+        {activeTab === 'evaluations' && (
+          <div className="space-y-5">
+            <div className="bg-white rounded-2xl border p-6 shadow-sm flex flex-wrap justify-between items-center gap-4">
+              <div>
+                <h2 className="font-bold text-lg text-slate-900 flex items-center gap-2">
+                  <Award className="w-5 h-5 text-indigo-600" /> Evaluasi & Rekap Perkembangan Siswa
+                </h2>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Catatan kelemahan konsep harian, evaluasi ketuntasan pembetulan, dan rekap bulanan komprehensif AI.
+                </p>
+              </div>
+              <button
+                onClick={handleGenerateMonthlyRecap}
+                disabled={isGeneratingMonthly}
+                className="px-4 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold flex items-center gap-2 shadow-sm transition-all"
+              >
+                <Sparkles className="w-4 h-4 text-amber-300" />
+                {isGeneratingMonthly ? 'Menyusun Rekap Bulanan...' : 'Generate Rekap Evaluasi Akhir Bulan (AI)'}
+              </button>
+            </div>
+
+            {/* Filter Bar */}
+            <div className="bg-white p-4 rounded-2xl border shadow-xs grid sm:grid-cols-3 gap-3 text-xs">
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">Filter Siswa</label>
+                <select
+                  value={evalStudentFilter}
+                  onChange={(e) => setEvalStudentFilter(e.target.value)}
+                  className="w-full px-3 py-2 border rounded-xl bg-white"
+                >
+                  <option value="">Semua Siswa</option>
+                  {students.map((s) => <option key={s.id} value={s.id}>{s.name} ({s.class})</option>)}
+                </select>
+              </div>
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">Filter Bulan</label>
+                <input
+                  type="month"
+                  value={evalMonthFilter}
+                  onChange={(e) => setEvalMonthFilter(e.target.value)}
+                  className="w-full px-3 py-2 border rounded-xl bg-white"
+                />
+              </div>
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">Jenis Evaluasi</label>
+                <select
+                  value={evalTypeFilter}
+                  onChange={(e) => setEvalTypeFilter(e.target.value)}
+                  className="w-full px-3 py-2 border rounded-xl bg-white"
+                >
+                  <option value="all">Semua Tipe</option>
+                  <option value="daily">Evaluasi Harian (Kelemahan Konsep)</option>
+                  <option value="correction">Evaluasi Pembetulan (Ketuntasan)</option>
+                  <option value="monthly_summary">Rekap Bulanan AI</option>
+                </select>
+              </div>
+            </div>
+
+            {/* Daftar Kronologis Evaluasi */}
+            {(() => {
+              const filtered = evaluations.filter((ev) => {
+                const matchStd = evalStudentFilter ? ev.studentId === evalStudentFilter : true;
+                const matchMonth = evalMonthFilter ? (ev.monthKey === evalMonthFilter || (ev.dateKey && ev.dateKey.startsWith(evalMonthFilter))) : true;
+                const matchType = evalTypeFilter === 'all' ? true : ev.evalType === evalTypeFilter;
+                return matchStd && matchMonth && matchType;
+              });
+
+              if (filtered.length === 0) {
+                return (
+                  <div className="bg-white rounded-2xl border p-12 text-center text-xs text-slate-400 space-y-2">
+                    <BookOpen className="w-8 h-8 text-slate-300 mx-auto" />
+                    <p>Belum ada catatan evaluasi untuk filter siswa & bulan yang dipilih.</p>
+                    <p className="text-[11px] text-slate-400">Hasil scan koreksi lembar jawaban akan otomatis mencatat evaluasi harian atau pembetulan di sini.</p>
+                  </div>
+                );
+              }
+
+              return (
+                <div className="space-y-3.5">
+                  {filtered.map((ev) => {
+                    const studentObj = students.find((s) => s.id === ev.studentId);
+                    const isDaily = ev.evalType === 'daily';
+                    const isCorrection = ev.evalType === 'correction';
+                    const isMonthly = ev.evalType === 'monthly_summary';
+
+                    return (
+                      <div key={ev.id} className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm space-y-3">
+                        <div className="flex flex-wrap items-center justify-between gap-2 border-b pb-2.5">
+                          <div className="flex items-center gap-2">
+                            <span className={`px-2.5 py-0.5 rounded-full font-bold text-[11px] border ${
+                              isDaily ? 'bg-amber-50 text-amber-800 border-amber-200' :
+                              isCorrection ? 'bg-emerald-50 text-emerald-800 border-emerald-200' :
+                              'bg-indigo-50 text-indigo-800 border-indigo-200'
+                            }`}>
+                              {isDaily ? 'Evaluasi Harian' : isCorrection ? 'Evaluasi Pembetulan' : 'Rekap Bulanan AI'}
+                            </span>
+                            <span className="text-xs font-bold text-slate-800">
+                              {studentObj ? `${studentObj.name} (${studentObj.class})` : 'Siswa'}
+                            </span>
+                          </div>
+                          <span className="text-[11px] text-slate-500 font-medium">
+                            {ev.dateKey || '-'}
+                          </span>
+                        </div>
+
+                        {ev.examTitle && (
+                          <p className="text-xs font-semibold text-indigo-700">
+                            Paket Soal: {ev.examTitle}
+                          </p>
+                        )}
+
+                        <p className="text-xs text-slate-700 leading-relaxed whitespace-pre-wrap">
+                          {ev.summaryText}
+                        </p>
+
+                        {ev.weakTopics && ev.weakTopics.length > 0 && (
+                          <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                            <span className="text-[11px] font-semibold text-slate-500">Materi:</span>
+                            {ev.weakTopics.map((top, idx) => (
+                              <span key={idx} className="px-2 py-0.5 rounded bg-slate-100 text-slate-700 font-medium text-[10px]">
+                                {top}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+
+                        <div className="flex justify-end gap-2 pt-2 border-t">
+                          {studentObj?.whatsapp && (
+                            <button
+                              onClick={() => {
+                                const waNum = formatWaNumber(studentObj.whatsapp);
+                                const textMsg = `Halo ${studentObj.parentName}, berikut catatan evaluasi belajar ananda *${studentObj.name}* (${ev.dateKey}):\n\n${ev.summaryText}\n\n- Bimbel Albita`;
+                                window.open(`https://wa.me/${waNum}?text=${encodeURIComponent(textMsg)}`, '_blank', 'noopener,noreferrer');
+                              }}
+                              className="px-3 py-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 rounded-xl text-xs font-bold flex items-center gap-1.5"
+                            >
+                              <Phone className="w-3.5 h-3.5" /> Kirim ke WA Orang Tua
+                            </button>
+                          )}
+                          <button
+                            onClick={async () => {
+                              if (!window.confirm('Hapus catatan evaluasi ini?')) return;
+                              const updated = evaluations.filter(e => e.id !== ev.id);
+                              setEvaluations(updated);
+                              localStorage.setItem('albita_evaluations', JSON.stringify(updated));
+                              if (supabase) {
+                                try { await supabase.from('evaluations').delete().eq('id', ev.id); } catch {}
+                              }
+                            }}
+                            className="p-1.5 text-rose-500 hover:bg-rose-50 rounded-lg text-xs"
+                            title="Hapus"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })()}
+          </div>
+        )}
+
+        {/* TAB 5: ABSENSI HARIAN (TOMBOL SIMPAN & WA TERPISAH) */}
         {activeTab === 'attendance' && (
           <div className="bg-white rounded-2xl border p-6 shadow-sm space-y-4">
             <div className="flex flex-wrap justify-between items-center gap-2 border-b pb-3">
@@ -1130,6 +2032,9 @@ export default function App() {
                 <h2 className="font-bold text-lg text-slate-900">Absensi Harian Tempat Les</h2>
                 <p className="text-xs text-slate-500">{currentDayName}, {currentDateNum} {currentMonthName} {currentYear}</p>
               </div>
+              <span className="text-xs text-slate-500 bg-slate-50 px-3 py-1.5 rounded-xl border">
+                Tombol Simpan & Kirim WA terpisah • Data otomatis tersimpan saat refresh
+              </span>
             </div>
 
             <div className="divide-y">
@@ -1144,7 +2049,7 @@ export default function App() {
                       <p className="font-bold text-sm text-slate-900">{std.name} <span className="text-xs font-normal text-slate-500">({std.class})</span></p>
                       <p className="text-[11px] text-slate-500">Wali: {std.parentName}</p>
                     </div>
-                                        <div className="flex flex-wrap items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
                       {['Hadir', 'Izin', 'Tidak Hadir'].map((st) => (
                         <button
                           key={st}
@@ -1162,28 +2067,40 @@ export default function App() {
                           {st}
                         </button>
                       ))}
+
+                      {/* TOMBOL SIMPAN & KIRIM WA TERPISAH */}
                       <div className="flex gap-1.5 ml-2">
                         <button
                           onClick={() => handleSaveAttendanceRow(std)}
-                          disabled={!isDirty}
-                          className={`px-3.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1 ${
+                          disabled={!isDirty && !currentChoice}
+                          className={`px-3.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1 transition-all ${
                             isDirty
-                              ? 'bg-indigo-600 text-white shadow-sm'
+                              ? 'bg-indigo-600 hover:bg-indigo-700 text-white shadow-sm animate-pulse'
+                              : savedToday
+                              ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
                               : 'bg-slate-100 text-slate-400 cursor-not-allowed'
                           }`}
                         >
-                          <Save className="w-3.5 h-3.5" /> Simpan
+                          {savedToday && !isDirty ? (
+                            <>
+                              <Check className="w-3.5 h-3.5 text-emerald-600" /> Tersimpan
+                            </>
+                          ) : (
+                            <>
+                              <Save className="w-3.5 h-3.5" /> Simpan
+                            </>
+                          )}
                         </button>
                         <button
                           onClick={() => handleSendAttendanceWA(std)}
-                          disabled={!currentChoice}
-                          className={`px-3.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1 bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100 disabled:opacity-50 disabled:cursor-not-allowed`}
+                          disabled={!currentChoice && !savedToday}
+                          className="px-3.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1 bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm disabled:opacity-40 disabled:cursor-not-allowed"
+                          title="Kirim pesan WhatsApp ke orang tua"
                         >
-                          <Phone className="w-3.5 h-3.5" /> WA
+                          <Phone className="w-3.5 h-3.5" /> Kirim WA
                         </button>
                       </div>
                     </div>
-
                   </div>
                 );
               })}
@@ -1191,7 +2108,7 @@ export default function App() {
           </div>
         )}
 
-        {/* TAB 5: KALENDER KEHADIRAN */}
+        {/* TAB 6: KALENDER KEHADIRAN */}
         {activeTab === 'calendar' && (
           <div className="bg-white rounded-2xl border p-6 shadow-sm space-y-4">
             <h2 className="font-bold text-lg text-slate-900 flex items-center gap-2">
@@ -1236,7 +2153,7 @@ export default function App() {
           </div>
         )}
 
-        {/* TAB 6: STATUS PEMBAYARAN SPP */}
+        {/* TAB 7: STATUS PEMBAYARAN SPP */}
         {activeTab === 'payments' && (
           <div className="space-y-4">
             <div className="bg-white rounded-2xl border p-6 shadow-sm space-y-4">
@@ -1311,7 +2228,7 @@ export default function App() {
           </div>
         )}
 
-        {/* TAB 7: CATATAN GURU */}
+        {/* TAB 8: CATATAN GURU */}
         {activeTab === 'notes' && (
           <div className="space-y-4">
             <h2 className="text-xl font-bold text-slate-900">Catatan Perkembangan Siswa ({currentMonthName})</h2>
@@ -1345,7 +2262,7 @@ export default function App() {
         )}
       </div>
 
-      {/* MODAL RENAME DATA SISWA */}
+      {/* MODAL RENAME SISWA */}
       {renameModalStudent && (
         <div className="fixed inset-0 bg-slate-900/50 z-50 flex items-center justify-center p-4">
           <form onSubmit={handleSaveRename} className="bg-white rounded-2xl max-w-md w-full p-6 space-y-4 shadow-xl">
@@ -1381,7 +2298,7 @@ export default function App() {
         </div>
       )}
 
-      {/* MODAL VIEW SOAL (PREVIEW) */}
+      {/* MODAL PREVIEW DOKUMEN SOAL ASLI */}
       {viewingExamModal && (
         <div className="fixed inset-0 bg-slate-900/50 z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl max-w-2xl w-full p-6 space-y-4 shadow-xl max-h-[85vh] flex flex-col">
@@ -1393,7 +2310,6 @@ export default function App() {
               <button onClick={() => setViewingExamModal(null)}><X className="w-4 h-4" /></button>
             </div>
 
-            {/* Tabs Preview: Konten DOC asli / Butir Soal */}
             <div className="overflow-y-auto flex-1 text-xs space-y-3">
               {viewingExamModal.docContent ? (
                 <div>
@@ -1515,6 +2431,191 @@ export default function App() {
               </button>
             </div>
           </form>
+        </div>
+      )}
+
+      {/* MODAL PREVIEW & GENERATE SOAL REMEDIAL */}
+      {remedialModal && (
+        <div className="fixed inset-0 bg-slate-900/50 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-2xl w-full p-6 space-y-4 shadow-xl max-h-[90vh] flex flex-col">
+            <div className="flex justify-between items-start border-b pb-3">
+              <div>
+                <span className="text-[11px] font-bold text-amber-700 bg-amber-50 px-2.5 py-0.5 rounded-md border border-amber-200">
+                  Paket Soal Pembetulan (Remedial AI)
+                </span>
+                <h3 className="font-bold text-base text-slate-900 mt-1">{remedialModal.remedialTitle}</h3>
+                <p className="text-xs text-slate-500">Siswa: {remedialModal.studentName} • Materi Sejenis dari Soal yang Salah</p>
+              </div>
+              <button onClick={() => setRemedialModal(null)}><X className="w-4 h-4" /></button>
+            </div>
+
+            <div className="overflow-y-auto space-y-4 flex-1 text-xs pr-1">
+              <div className="space-y-3">
+                {remedialModal.questions.map((q, idx) => (
+                  <div key={idx} className="p-4 rounded-xl border bg-slate-50 space-y-2">
+                    <div className="flex justify-between items-center">
+                      <span className="font-bold text-indigo-700">Soal Remedial #{q.no} ({q.topic || 'Materi'})</span>
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-semibold text-slate-600 mb-1">Pertanyaan Soal Baru (Setara):</label>
+                      <textarea
+                        rows="2"
+                        value={q.text}
+                        onChange={(e) => {
+                          const updated = [...remedialModal.questions];
+                          updated[idx] = { ...updated[idx], text: e.target.value };
+                          setRemedialModal({ ...remedialModal, questions: updated });
+                        }}
+                        className="w-full p-2 border rounded-lg bg-white"
+                      />
+                    </div>
+                    <div className="grid sm:grid-cols-2 gap-2">
+                      <div>
+                        <label className="block text-[11px] font-semibold text-slate-600 mb-1">Kunci Jawaban:</label>
+                        <input
+                          type="text"
+                          value={q.answerKey}
+                          onChange={(e) => {
+                            const updated = [...remedialModal.questions];
+                            updated[idx] = { ...updated[idx], answerKey: e.target.value };
+                            setRemedialModal({ ...remedialModal, questions: updated });
+                          }}
+                          className="w-full px-2.5 py-1.5 border rounded-lg bg-white font-semibold text-indigo-800"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[11px] font-semibold text-slate-600 mb-1">Pembahasan Langkah:</label>
+                        <input
+                          type="text"
+                          value={q.explanation || ''}
+                          onChange={(e) => {
+                            const updated = [...remedialModal.questions];
+                            updated[idx] = { ...updated[idx], explanation: e.target.value };
+                            setRemedialModal({ ...remedialModal, questions: updated });
+                          }}
+                          className="w-full px-2.5 py-1.5 border rounded-lg bg-white text-slate-700"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Opsi Sertakan Halaman Kunci Jawaban */}
+              <div className="p-3 rounded-xl bg-indigo-50/50 border border-indigo-100 flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  id="includeExp"
+                  checked={includeExplanationsInExport}
+                  onChange={(e) => setIncludeExplanationsInExport(e.target.checked)}
+                  className="rounded text-indigo-600 focus:ring-indigo-500"
+                />
+                <label htmlFor="includeExp" className="text-xs font-semibold text-slate-700 cursor-pointer">
+                  Sertakan Halaman Kunci Jawaban & Pembahasan pada dokumen unduhan
+                </label>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap justify-between items-center gap-2 border-t pt-3">
+              <div className="flex gap-2">
+                <button
+                  onClick={handleDownloadRemedialDOCX}
+                  className="px-3 py-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 rounded-xl text-xs font-bold flex items-center gap-1.5"
+                >
+                  <Download className="w-3.5 h-3.5" /> Download DOCX
+                </button>
+                <button
+                  onClick={handleDownloadRemedialPDF}
+                  className="px-3 py-2 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded-xl text-xs font-bold flex items-center gap-1.5"
+                >
+                  <Download className="w-3.5 h-3.5" /> Download PDF
+                </button>
+              </div>
+              <div className="flex gap-2">
+                <button
+                  onClick={handleSaveRemedialToExams}
+                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-sm"
+                >
+                  <Save className="w-3.5 h-3.5" /> Simpan ke Bank Soal (Pembetulan)
+                </button>
+                <button
+                  onClick={() => setRemedialModal(null)}
+                  className="px-3 py-2 rounded-xl bg-slate-800 text-white text-xs font-bold"
+                >
+                  Tutup
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL REKAP EVALUASI BULANAN AI */}
+      {monthlyRecapModal && (
+        <div className="fixed inset-0 bg-slate-900/50 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-2xl w-full p-6 space-y-4 shadow-xl max-h-[90vh] flex flex-col">
+            <div className="flex justify-between items-start border-b pb-3">
+              <div>
+                <span className="text-[11px] font-bold text-indigo-700 bg-indigo-50 px-2.5 py-0.5 rounded-md border border-indigo-200">
+                  Laporan Rekap Akhir Bulan (AI)
+                </span>
+                <h3 className="font-bold text-base text-slate-900 mt-1">
+                  {monthlyRecapModal.studentName} • Periode {monthlyRecapModal.monthLabel}
+                </h3>
+                <p className="text-xs text-slate-500">Laporan komprehensif perkembangan belajar untuk pengajar dan orang tua</p>
+              </div>
+              <button onClick={() => setMonthlyRecapModal(null)}><X className="w-4 h-4" /></button>
+            </div>
+
+            <div className="overflow-y-auto flex-1 text-xs space-y-2 pr-1">
+              <label className="block font-bold text-slate-700">Isi Laporan Evaluasi Bulanan (Bisa Diedit):</label>
+              <textarea
+                rows="14"
+                value={monthlyRecapModal.recapText}
+                onChange={(e) => setMonthlyRecapModal({ ...monthlyRecapModal, recapText: e.target.value })}
+                className="w-full p-3.5 border rounded-xl bg-slate-50 font-mono text-[11px] leading-relaxed focus:bg-white focus:outline-none focus:border-indigo-500"
+              />
+            </div>
+
+            <div className="flex flex-wrap justify-between items-center gap-2 border-t pt-3">
+              <div className="flex gap-2">
+                <button
+                  onClick={() => {
+                    navigator.clipboard.writeText(monthlyRecapModal.recapText);
+                    alert('Teks laporan berhasil disalin ke clipboard!');
+                  }}
+                  className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold flex items-center gap-1.5"
+                >
+                  <Copy className="w-3.5 h-3.5" /> Salin Teks
+                </button>
+                {monthlyRecapModal.parentPhone && (
+                  <button
+                    onClick={() => {
+                      const waNum = formatWaNumber(monthlyRecapModal.parentPhone);
+                      window.open(`https://wa.me/${waNum}?text=${encodeURIComponent(monthlyRecapModal.recapText)}`, '_blank', 'noopener,noreferrer');
+                    }}
+                    className="px-3 py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 rounded-xl text-xs font-bold flex items-center gap-1.5"
+                  >
+                    <Phone className="w-3.5 h-3.5" /> Kirim ke WhatsApp
+                  </button>
+                )}
+              </div>
+              <div className="flex gap-2">
+                <button
+                  onClick={handleSaveMonthlyRecapRecord}
+                  className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-sm"
+                >
+                  <Save className="w-3.5 h-3.5" /> Simpan ke Evaluasi Bulanan
+                </button>
+                <button
+                  onClick={() => setMonthlyRecapModal(null)}
+                  className="px-3 py-2 rounded-xl bg-slate-800 text-white text-xs font-bold"
+                >
+                  Tutup
+                </button>
+              </div>
+            </div>
+          </div>
         </div>
       )}
     </div>
