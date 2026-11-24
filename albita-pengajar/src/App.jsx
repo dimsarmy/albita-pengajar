@@ -37,7 +37,8 @@ import {
   Share2,
   Copy,
   Award,
-  HelpCircle
+  HelpCircle,
+  ArrowRight
 } from 'lucide-react';
 
 // Koneksi Supabase dari Environment Variables
@@ -66,6 +67,41 @@ const formatWaNumber = (num) => {
   let clean = num.replace(/[^0-9]/g, '');
   if (clean.startsWith('0')) clean = '62' + clean.slice(1);
   return clean;
+};
+
+// Helper: Normalisasi berbagai format tanggal menjadi YYYY-MM-DD
+const normalizeDateKey = (val) => {
+  if (!val) return '';
+  if (typeof val !== 'string') return '';
+  const ymdMatch = val.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (ymdMatch) return `${ymdMatch[1]}-${ymdMatch[2]}-${ymdMatch[3]}`;
+
+  for (let m = 0; m < MONTHS_ID.length; m++) {
+    const mName = MONTHS_ID[m];
+    const regex = new RegExp(`(\\d{1,2})\\s+${mName}\\s+(\\d{4})`, 'i');
+    const match = val.match(regex);
+    if (match) {
+      const day = String(parseInt(match[1], 10)).padStart(2, '0');
+      const month = String(m + 1).padStart(2, '0');
+      const year = match[2];
+      return `${year}-${month}-${day}`;
+    }
+  }
+
+  return '';
+};
+
+// Helper: Format tanggal YYYY-MM-DD menjadi format teks Indonesia (misal: 24 November 2026)
+const formatDateIndo = (dateStr) => {
+  if (!dateStr) return '-';
+  const parts = dateStr.split('-');
+  if (parts.length === 3) {
+    const y = parts[0];
+    const m = parseInt(parts[1], 10) - 1;
+    const d = parseInt(parts[2], 10);
+    return `${d} ${MONTHS_ID[m] || ''} ${y}`;
+  }
+  return dateStr;
 };
 
 // Helper: Convert File to inlineData for Gemini Vision
@@ -132,6 +168,16 @@ export default function App() {
     }
   });
 
+  // State Pilihan Tanggal Soal Bank Soal & Tanggal Scan
+  const [uploadExamDate, setUploadExamDate] = useState(todayKey);
+  const [editExamDate, setEditExamDate] = useState(todayKey);
+  const [scanDate, setScanDate] = useState(todayKey);
+
+  // State Navigasi Kalender
+  const [calMonthIdx, setCalMonthIdx] = useState(now.getMonth());
+  const [calYear, setCalYear] = useState(now.getFullYear());
+  const [selectedCalDate, setSelectedCalDate] = useState(todayKey);
+
   // Sinkronisasi data real-time dengan Supabase Cloud Database
   useEffect(() => {
     if (!supabase) return;
@@ -150,22 +196,32 @@ export default function App() {
         })));
 
         const { data: exms } = await supabase.from('exams').select('*');
-        if (exms) setExams(exms.map(e => ({
-          ...e,
-          fileName: e.file_name || e.fileName,
-          uploadDate: e.upload_date || e.uploadDate,
-          docContent: e.doc_content || e.docContent || ''
-        })));
+        if (exms) setExams(exms.map(e => {
+          const normDate = e.exam_date || e.date_key || normalizeDateKey(e.upload_date || e.uploadDate) || todayKey;
+          return {
+            ...e,
+            fileName: e.file_name || e.fileName,
+            uploadDate: e.upload_date || e.uploadDate,
+            examDate: normDate,
+            dateKey: normDate,
+            docContent: e.doc_content || e.docContent || ''
+          };
+        }));
 
         const { data: subs } = await supabase.from('submissions').select('*');
-        if (subs) setSubmissions(subs.map(sub => ({
-          id: sub.id,
-          studentId: sub.student_id,
-          examId: sub.exam_id,
-          date: sub.date,
-          score: sub.score,
-          results: sub.results
-        })));
+        if (subs) setSubmissions(subs.map(sub => {
+          const normDate = sub.exam_date || sub.date_key || normalizeDateKey(sub.date) || todayKey;
+          return {
+            id: sub.id,
+            studentId: sub.student_id,
+            examId: sub.exam_id,
+            date: sub.date,
+            examDate: normDate,
+            dateKey: normDate,
+            score: sub.score,
+            results: sub.results
+          };
+        }));
 
         const { data: pays } = await supabase.from('payments').select('*');
         if (pays) {
@@ -248,9 +304,21 @@ export default function App() {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'students' }, fetchAllData)
       .subscribe();
 
+    const examsChannel = supabase
+      .channel('public:exams')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'exams' }, fetchAllData)
+      .subscribe();
+
+    const subsChannel = supabase
+      .channel('public:submissions')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'submissions' }, fetchAllData)
+      .subscribe();
+
     return () => {
       supabase.removeChannel(attendanceChannel);
       supabase.removeChannel(studentChannel);
+      supabase.removeChannel(examsChannel);
+      supabase.removeChannel(subsChannel);
     };
   }, []);
 
@@ -302,7 +370,6 @@ export default function App() {
   // State Absensi
   const [todayAttendanceDraft, setTodayAttendanceDraft] = useState({});
   const [attendanceDirty, setAttendanceDirty] = useState({});
-  const [selectedCalDate, setSelectedCalDate] = useState(null);
 
   const [openPrevMonthToggle, setOpenPrevMonthToggle] = useState(null);
   const [noteDrafts, setNoteDrafts] = useState({});
@@ -371,7 +438,7 @@ export default function App() {
                       <h2 className="font-bold text-base text-slate-900">{examDetail.title}</h2>
                       <div className="flex flex-wrap items-center gap-3 text-[11px] text-slate-500">
                         <span className="flex items-center gap-1">
-                          <Upload className="w-3 h-3 text-indigo-500" /> Soal Diupload: <strong>{examDetail.uploadDate || '-'}</strong>
+                          <Upload className="w-3 h-3 text-indigo-500" /> Tanggal Soal: <strong>{formatDateIndo(examDetail.examDate || examDetail.dateKey) || examDetail.uploadDate || '-'}</strong>
                         </span>
                         <span className="flex items-center gap-1">
                           <Camera className="w-3 h-3 text-emerald-600" /> Hasil Scan: <strong>{sub.date || '-'}</strong>
@@ -611,12 +678,21 @@ export default function App() {
     }
   };
 
-  // UPLOAD DOKUMEN BANK SOAL
-  const handleUploadTeacherExam = async (file) => {
+  // ==============================================================
+  // FITUR 1: UPLOAD DOKUMEN BANK SOAL DENGAN PILIHAN TANGGAL SOAL
+  // ==============================================================
+  const handleUploadTeacherExam = async (file, customDate = uploadExamDate) => {
     if (!file) return;
     setIsUploadingDoc(true);
+
+    const targetDateKey = customDate || todayKey;
+    const parts = targetDateKey.split('-');
+    const yNum = parts[0];
+    const mNum = parseInt(parts[1], 10) - 1;
+    const dNum = parseInt(parts[2], 10);
+    const mName = MONTHS_ID[mNum] || currentMonthName;
     const timeStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
-    const fullUploadDate = `${currentDateNum} ${currentMonthName} ${currentYear} (${timeStr})`;
+    const fullUploadDate = `${dNum} ${mName} ${yNum} (${timeStr})`;
     const fileName = file.name;
     const isDoc = /\.(doc|docx)$/i.test(fileName);
 
@@ -652,6 +728,8 @@ export default function App() {
       title: fileName.replace(/\.(doc|docx|pdf|jpg|png)$/i, '').replace(/_/g, ' '),
       fileName: fileName,
       uploadDate: fullUploadDate,
+      examDate: targetDateKey,
+      dateKey: targetDateKey,
       subject: 'Bank Soal Guru',
       docContent: docContent,
       questions: parsedQuestions
@@ -661,23 +739,30 @@ export default function App() {
     setIsUploadingDoc(false);
 
     if (supabase) {
-      await supabase.from('exams').insert({
-        id: newExam.id,
-        title: newExam.title,
-        file_name: newExam.fileName,
-        upload_date: newExam.uploadDate,
-        subject: newExam.subject,
-        questions: newExam.questions,
-        doc_content: newExam.docContent
-      });
+      try {
+        await supabase.from('exams').insert({
+          id: newExam.id,
+          title: newExam.title,
+          file_name: newExam.fileName,
+          upload_date: newExam.uploadDate,
+          exam_date: newExam.examDate,
+          date_key: newExam.dateKey,
+          subject: newExam.subject,
+          questions: newExam.questions,
+          doc_content: newExam.docContent
+        });
+      } catch (err) {
+        console.warn('Gagal insert exam ke Supabase:', err);
+      }
     }
   };
 
-  // FITUR EDIT BANK SOAL
+  // FITUR EDIT BANK SOAL (TERMASUK EDIT TANGGAL SOAL)
   const handleOpenEditExam = (exam) => {
     setEditingExamModal(exam);
     setEditExamTitle(exam.title || '');
     setEditExamSubject(exam.subject || 'Bank Soal Guru');
+    setEditExamDate(exam.examDate || exam.dateKey || normalizeDateKey(exam.uploadDate) || todayKey);
     setEditExamQuestions(exam.questions ? [...exam.questions] : []);
   };
 
@@ -703,10 +788,21 @@ export default function App() {
     e.preventDefault();
     if (!editingExamModal) return;
 
+    const parts = editExamDate.split('-');
+    const yNum = parts[0];
+    const mNum = parseInt(parts[1], 10) - 1;
+    const dNum = parseInt(parts[2], 10);
+    const mName = MONTHS_ID[mNum] || currentMonthName;
+    const timeStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+    const formattedUploadDate = `${dNum} ${mName} ${yNum} (${timeStr})`;
+
     const updatedExam = {
       ...editingExamModal,
       title: editExamTitle.trim() || editingExamModal.title,
       subject: editExamSubject.trim() || editingExamModal.subject,
+      examDate: editExamDate,
+      dateKey: editExamDate,
+      uploadDate: formattedUploadDate,
       questions: editExamQuestions
     };
 
@@ -714,11 +810,18 @@ export default function App() {
     setEditingExamModal(null);
 
     if (supabase) {
-      await supabase.from('exams').update({
-        title: updatedExam.title,
-        subject: updatedExam.subject,
-        questions: updatedExam.questions
-      }).eq('id', updatedExam.id);
+      try {
+        await supabase.from('exams').update({
+          title: updatedExam.title,
+          subject: updatedExam.subject,
+          exam_date: updatedExam.examDate,
+          date_key: updatedExam.dateKey,
+          upload_date: updatedExam.uploadDate,
+          questions: updatedExam.questions
+        }).eq('id', updatedExam.id);
+      } catch (err) {
+        console.warn('Gagal update exam ke Supabase:', err);
+      }
     }
   };
 
@@ -733,6 +836,7 @@ export default function App() {
   const handleDownloadExam = async (exam, format = 'doc') => {
     const title = exam.title || 'Soal_Albita';
     const questions = exam.questions || [];
+    const displayDate = formatDateIndo(exam.examDate || exam.dateKey) || exam.uploadDate || '-';
 
     if (format === 'pdf') {
       const pdf = new jsPDF({ unit: 'mm', format: 'a4' });
@@ -746,7 +850,7 @@ export default function App() {
 
       pdf.setFontSize(9);
       pdf.setFont('helvetica', 'normal');
-      pdf.text(`Mata Pelajaran: ${exam.subject || '-'}  |  Diupload: ${exam.uploadDate || '-'}`, margin, y);
+      pdf.text(`Mata Pelajaran: ${exam.subject || '-'}  |  Tanggal Soal: ${displayDate}`, margin, y);
       y += 10;
 
       pdf.setFontSize(10);
@@ -780,7 +884,7 @@ export default function App() {
         }),
         new Paragraph({
           children: [
-            new TextRun({ text: `Mata Pelajaran: ${exam.subject || '-'}  |  Diupload: ${exam.uploadDate || '-'}`, italics: true, size: 20 })
+            new TextRun({ text: `Mata Pelajaran: ${exam.subject || '-'}  |  Tanggal Soal: ${displayDate}`, italics: true, size: 20 })
           ]
         }),
         new Paragraph({ text: '' }),
@@ -813,10 +917,9 @@ export default function App() {
     }
   };
 
-  // ==========================================
-  // FITUR 1: LOGIKA AI VISION PADA SCAN KOREKSI
-  // (4 ATURAN WARNA & TANDA KOREKSI)
-  // ==========================================
+  // ==============================================================
+  // FITUR 1 & 2: SCAN KOREKSI JAWABAN SISWA (DENGAN TANGGAL SOAL/LES)
+  // ==============================================================
   const handleScanPhoto = async (imageFile) => {
     if (!scanStudentId) {
       alert('Pilih siswa terlebih dahulu!');
@@ -831,7 +934,16 @@ export default function App() {
     setIsScanning(true);
     setLastScanResult(null);
 
-    // Buat URL preview gambar
+    // Tanggal kejadian soal/les yang dipilih pengajar
+    const targetDateKey = scanDate || todayKey;
+    const parts = targetDateKey.split('-');
+    const yNum = parts[0];
+    const mNum = parseInt(parts[1], 10) - 1;
+    const dNum = parseInt(parts[2], 10);
+    const mName = MONTHS_ID[mNum] || currentMonthName;
+    const timeStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+    const fullScanDate = `${dNum} ${mName} ${yNum} (${timeStr})`;
+
     if (imageFile) {
       const previewUrl = URL.createObjectURL(imageFile);
       setScanPreviewImage(previewUrl);
@@ -842,7 +954,6 @@ export default function App() {
       let aiNote = '';
 
       if (genAI && imageFile) {
-        // Panggil Gemini Vision dengan instruksi 4 aturan
         try {
           const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
           const imagePart = await fileToGenerativePart(imageFile);
@@ -941,14 +1052,15 @@ Kembalikan HANYA format JSON murni (array of objects) tanpa awalan/akhiran markd
       const wrongList = detectedResults.filter(r => r.status === 'wrong');
       const totalQuestions = detectedResults.length;
       const calcScore = totalQuestions > 0 ? Math.round(((totalQuestions - wrongList.length) / totalQuestions) * 100) : 100;
-      const timeStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
       const targetStudent = students.find((s) => s.id === scanStudentId);
 
       const newSub = {
         id: `sub-${Date.now()}`,
         studentId: scanStudentId,
         examId: targetExam.id,
-        date: `${currentDateNum} ${currentMonthName} ${currentYear} (${timeStr})`,
+        date: fullScanDate,
+        examDate: targetDateKey,
+        dateKey: targetDateKey,
         score: calcScore,
         results: detectedResults
       };
@@ -967,33 +1079,37 @@ Kembalikan HANYA format JSON murni (array of objects) tanpa awalan/akhiran markd
       setIsScanning(false);
 
       if (supabase) {
-        await supabase.from('submissions').insert({
-          id: newSub.id,
-          student_id: newSub.studentId,
-          exam_id: newSub.examId,
-          date: newSub.date,
-          score: newSub.score,
-          results: newSub.results
-        });
+        try {
+          await supabase.from('submissions').insert({
+            id: newSub.id,
+            student_id: newSub.studentId,
+            exam_id: newSub.examId,
+            date: newSub.date,
+            exam_date: newSub.examDate,
+            date_key: newSub.dateKey,
+            score: newSub.score,
+            results: newSub.results
+          });
+        } catch (err) {
+          console.warn('Gagal insert submission ke Supabase:', err);
+        }
       }
 
-      // ==========================================
-      // FITUR 3: EVALUASI HARIAN & EVALUASI PEMBETULAN
-      // ==========================================
+      // Evaluasi Harian & Evaluasi Pembetulan Otomatis
       const isCorrectionExam = (targetExam.title || '').toLowerCase().includes('pembetulan');
+      const targetMonthKey = `${yNum}-${String(mNum + 1).padStart(2, '0')}`;
 
       if (wrongList.length > 0) {
-        // Kasus A: Ada soal salah -> Buat Evaluasi Harian Otomatis
         const weakTopics = Array.from(new Set(wrongList.map(w => w.topic || 'Materi Belum Tuntas')));
         const wrongNos = wrongList.map(w => `No. ${w.no}`).join(', ');
 
-        const dailySummaryText = `Ananda ${targetStudent?.name} pada paket "${targetExam.title}" mengalami kendala pada ${wrongNos}. Kelemahan konsep terdeteksi pada materi: ${weakTopics.join(', ')}. Perlu diberikan latihan pembetulan/remedial yang setara.`;
+        const dailySummaryText = `Ananda ${targetStudent?.name} pada paket "${targetExam.title}" (${formatDateIndo(targetDateKey)}) mengalami kendala pada ${wrongNos}. Kelemahan konsep terdeteksi pada materi: ${weakTopics.join(', ')}. Perlu diberikan latihan pembetulan/remedial yang setara.`;
 
         const newDailyEval = {
           id: `eval-daily-${Date.now()}`,
           evalType: 'daily',
-          dateKey: todayKey,
-          monthKey: currentMonthKey,
+          dateKey: targetDateKey,
+          monthKey: targetMonthKey,
           studentId: scanStudentId,
           summaryText: dailySummaryText,
           weakTopics: weakTopics,
@@ -1003,14 +1119,13 @@ Kembalikan HANYA format JSON murni (array of objects) tanpa awalan/akhiran markd
 
         await saveEvaluationRecord(newDailyEval);
       } else if (isCorrectionExam && wrongList.length === 0) {
-        // Kasus B: Paket Pembetulan dikerjakan dan sudah Benar Semua -> Buat Evaluasi Pembetulan Otomatis
-        const correctionSummaryText = `Peningkatan Ketuntasan: Ananda ${targetStudent?.name} telah berhasil menyelesaikan paket pembetulan "${targetExam.title}" dengan hasil 100% tuntas. Kesalahan konsep sebelumnya telah diperbaiki dengan baik.`;
+        const correctionSummaryText = `Peningkatan Ketuntasan: Ananda ${targetStudent?.name} telah berhasil menyelesaikan paket pembetulan "${targetExam.title}" (${formatDateIndo(targetDateKey)}) dengan hasil 100% tuntas. Kesalahan konsep sebelumnya telah diperbaiki dengan baik.`;
 
         const newCorrectionEval = {
           id: `eval-corr-${Date.now()}`,
           evalType: 'correction',
-          dateKey: todayKey,
-          monthKey: currentMonthKey,
+          dateKey: targetDateKey,
+          monthKey: targetMonthKey,
           studentId: scanStudentId,
           summaryText: correctionSummaryText,
           weakTopics: ['Materi Tuntas'],
@@ -1028,10 +1143,7 @@ Kembalikan HANYA format JSON murni (array of objects) tanpa awalan/akhiran markd
     }
   };
 
-  // ==========================================
-  // FITUR 2: REGENERATE SOAL SALAH + KUNCI JAWABAN
-  // (PREVIEW, PDF, DOCX, & SIMPAN SEBAGAI PEMBETULAN)
-  // ==========================================
+  // GENERATOR SOAL REMEDIAL
   const handleGenerateRemedial = async () => {
     if (!lastScanResult || !lastScanResult.wrongQuestionsList || lastScanResult.wrongQuestionsList.length === 0) {
       alert('Tidak ada butir soal yang salah (Aturan 1 & 2) untuk dibuatkan remedial.');
@@ -1081,7 +1193,6 @@ Kembalikan HANYA array JSON murni tanpa markdown codeblock:
       }
     }
 
-    // Fallback jika offline/API gagal
     if (!generatedQuestions || generatedQuestions.length === 0) {
       generatedQuestions = sourceQuestions.map((q, idx) => ({
         no: idx + 1,
@@ -1097,24 +1208,32 @@ Kembalikan HANYA array JSON murni tanpa markdown codeblock:
       remedialTitle: `Pembetulan - ${originalExam.title}`,
       subject: originalExam.subject || 'Bank Soal Guru',
       studentName: lastScanResult.student?.name || 'Siswa',
+      examDate: lastScanResult.submission?.examDate || scanDate || todayKey,
       questions: generatedQuestions
     });
 
     setIsGeneratingRemedial(false);
   };
 
-  // Simpan Paket Remedial ke Bank Soal sebagai "Pembetulan - [Judul]"
   const handleSaveRemedialToExams = async () => {
     if (!remedialModal) return;
 
+    const targetDateKey = remedialModal.examDate || scanDate || todayKey;
+    const parts = targetDateKey.split('-');
+    const yNum = parts[0];
+    const mNum = parseInt(parts[1], 10) - 1;
+    const dNum = parseInt(parts[2], 10);
+    const mName = MONTHS_ID[mNum] || currentMonthName;
     const timeStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
-    const fullUploadDate = `${currentDateNum} ${currentMonthName} ${currentYear} (${timeStr})`;
+    const fullUploadDate = `${dNum} ${mName} ${yNum} (${timeStr})`;
 
     const newRemedialExam = {
       id: `exam-remedial-${Date.now()}`,
       title: remedialModal.remedialTitle,
       fileName: `${remedialModal.remedialTitle.replace(/\s+/g, '_')}.docx`,
       uploadDate: fullUploadDate,
+      examDate: targetDateKey,
+      dateKey: targetDateKey,
       subject: remedialModal.subject || 'Pembetulan Soal',
       docContent: '',
       questions: remedialModal.questions.map((q, idx) => ({
@@ -1134,6 +1253,8 @@ Kembalikan HANYA array JSON murni tanpa markdown codeblock:
           title: newRemedialExam.title,
           file_name: newRemedialExam.fileName,
           upload_date: newRemedialExam.uploadDate,
+          exam_date: newRemedialExam.examDate,
+          date_key: newRemedialExam.dateKey,
           subject: newRemedialExam.subject,
           questions: newRemedialExam.questions,
           doc_content: ''
@@ -1143,11 +1264,10 @@ Kembalikan HANYA array JSON murni tanpa markdown codeblock:
       }
     }
 
-    alert(`Paket "${newRemedialExam.title}" berhasil disimpan ke Bank Soal! Besok bisa langsung diberikan ke siswa.`);
+    alert(`Paket "${newRemedialExam.title}" berhasil disimpan ke Bank Soal untuk tanggal ${formatDateIndo(targetDateKey)}! Besok bisa langsung diberikan ke siswa.`);
     setRemedialModal(null);
   };
 
-  // Download Remedial PDF
   const handleDownloadRemedialPDF = () => {
     if (!remedialModal) return;
     const pdf = new jsPDF({ unit: 'mm', format: 'a4' });
@@ -1161,7 +1281,7 @@ Kembalikan HANYA array JSON murni tanpa markdown codeblock:
 
     pdf.setFontSize(10);
     pdf.setFont('helvetica', 'normal');
-    pdf.text(`Nama Siswa: ${remedialModal.studentName}   |   Tanggal: ${currentDateNum} ${currentMonthName} ${currentYear}`, margin, y);
+    pdf.text(`Nama Siswa: ${remedialModal.studentName}   |   Tanggal: ${formatDateIndo(remedialModal.examDate || todayKey)}`, margin, y);
     y += 10;
 
     pdf.setDrawColor(200, 200, 200);
@@ -1212,7 +1332,6 @@ Kembalikan HANYA array JSON murni tanpa markdown codeblock:
     pdf.save(`${remedialModal.remedialTitle}.pdf`);
   };
 
-  // Download Remedial DOCX
   const handleDownloadRemedialDOCX = async () => {
     if (!remedialModal) return;
 
@@ -1223,7 +1342,7 @@ Kembalikan HANYA array JSON murni tanpa markdown codeblock:
       }),
       new Paragraph({
         children: [
-          new TextRun({ text: `Nama Siswa: ${remedialModal.studentName}   |   Tanggal: ${currentDateNum} ${currentMonthName} ${currentYear}`, italics: true, size: 20 })
+          new TextRun({ text: `Nama Siswa: ${remedialModal.studentName}   |   Tanggal: ${formatDateIndo(remedialModal.examDate || todayKey)}`, italics: true, size: 20 })
         ]
       }),
       new Paragraph({ text: '' }),
@@ -1275,9 +1394,7 @@ Kembalikan HANYA array JSON murni tanpa markdown codeblock:
     URL.revokeObjectURL(url);
   };
 
-  // ==========================================
-  // FITUR 4: REKAP EVALUASI AKHIR BULAN (AI)
-  // ==========================================
+  // REKAP EVALUASI AKHIR BULAN (AI)
   const handleGenerateMonthlyRecap = async () => {
     setIsGeneratingMonthly(true);
 
@@ -1383,8 +1500,10 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
     }
   };
 
-  const daysInCurrentMonth = new Date(currentYear, currentMonthIdx + 1, 0).getDate();
-  const calendarDays = Array.from({ length: daysInCurrentMonth }, (_, i) => i + 1);
+  // Perhitungan Kalender
+  const daysInCalMonth = new Date(calYear, calMonthIdx + 1, 0).getDate();
+  const calendarDays = Array.from({ length: daysInCalMonth }, (_, i) => i + 1);
+  const firstDayOfWeek = new Date(calYear, calMonthIdx, 1).getDay();
 
   const previousThreeMonths = [1, 2, 3].map((offset) => {
     const d = new Date(currentYear, currentMonthIdx - offset, 1);
@@ -1466,7 +1585,7 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
         </div>
 
         <div className="space-y-2">
-          <button onClick={() => { setScanStudentId(std.id); setActiveTab('scanner'); }} className="w-full py-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5">
+          <button onClick={() => { setScanStudentId(std.id); setScanDate(todayKey); setActiveTab('scanner'); }} className="w-full py-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5">
             <Camera className="w-3.5 h-3.5" /> Scan Lembar Kerja
           </button>
           <button onClick={() => handleSaveStudentCard(std.id)} disabled={!currentEdit.isDirty} className={`w-full py-2 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all ${currentEdit.isDirty ? 'bg-amber-500 hover:bg-amber-600 text-white shadow-sm animate-pulse' : 'bg-slate-100 text-slate-400 cursor-not-allowed'}`}>
@@ -1508,14 +1627,14 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
           <button onClick={() => setActiveTab('scanner')} className={`px-4 py-2.5 rounded-xl text-sm font-medium whitespace-nowrap flex items-center gap-1.5 ${activeTab === 'scanner' ? 'bg-indigo-600 text-white shadow-sm' : 'bg-white text-slate-600 border'}`}>
             <Sparkles className="w-4 h-4 text-amber-300" /> Scan Koreksi AI
           </button>
+          <button onClick={() => setActiveTab('calendar')} className={`px-4 py-2.5 rounded-xl text-sm font-medium whitespace-nowrap flex items-center gap-1.5 ${activeTab === 'calendar' ? 'bg-indigo-600 text-white shadow-sm' : 'bg-white text-slate-600 border'}`}>
+            <CalendarIcon className="w-4 h-4" /> Kalender & Rekap
+          </button>
           <button onClick={() => setActiveTab('evaluations')} className={`px-4 py-2.5 rounded-xl text-sm font-medium whitespace-nowrap flex items-center gap-1.5 ${activeTab === 'evaluations' ? 'bg-indigo-600 text-white shadow-sm' : 'bg-white text-slate-600 border'}`}>
             <Award className="w-4 h-4" /> Evaluasi ({evaluations.length})
           </button>
           <button onClick={() => setActiveTab('attendance')} className={`px-4 py-2.5 rounded-xl text-sm font-medium whitespace-nowrap ${activeTab === 'attendance' ? 'bg-indigo-600 text-white shadow-sm' : 'bg-white text-slate-600 border'}`}>
             Absensi
-          </button>
-          <button onClick={() => setActiveTab('calendar')} className={`px-4 py-2.5 rounded-xl text-sm font-medium whitespace-nowrap ${activeTab === 'calendar' ? 'bg-indigo-600 text-white shadow-sm' : 'bg-white text-slate-600 border'}`}>
-            Kalender
           </button>
           <button onClick={() => setActiveTab('payments')} className={`px-4 py-2.5 rounded-xl text-sm font-medium whitespace-nowrap flex items-center gap-1.5 ${activeTab === 'payments' ? 'bg-indigo-600 text-white shadow-sm' : 'bg-white text-slate-600 border'}`}>
             Status Pembayaran
@@ -1594,33 +1713,50 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
           </div>
         )}
 
-        {/* TAB 2: BANK SOAL */}
+        {/* TAB 2: BANK SOAL (DENGAN INPUT TANGGAL SOAL) */}
         {activeTab === 'exams' && (
           <div className="space-y-4">
             <div className="bg-white rounded-2xl border p-6 flex flex-wrap justify-between items-center gap-4 shadow-sm">
               <div>
                 <h2 className="font-bold text-lg text-slate-900">Bank Soal Guru (Soal Jadi / Materi)</h2>
-                <p className="text-xs text-slate-500 mt-0.5">Upload dokumen soal — tanggal unggah dicatat otomatis dan pengajar dapat mengedit butir soal kapan saja.</p>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Tentukan tanggal pelaksanaan soal dan unggah dokumen soal (DOCX/DOC). Data akan otomatis disinkronkan ke Kalender.
+                </p>
               </div>
-              <label className="px-4 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold flex items-center gap-2 cursor-pointer shadow-sm">
-                <Upload className="w-4 h-4" /> {isUploadingDoc ? 'Mengunggah...' : 'Upload Dokumen Soal'}
-                <input
-                  type="file"
-                  accept=".doc,.docx,.pdf,.jpg,.png,.txt"
-                  className="hidden"
-                  onChange={(e) => {
-                    if (e.target.files && e.target.files[0]) {
-                      handleUploadTeacherExam(e.target.files[0]);
-                      e.target.value = '';
-                    }
-                  }}
-                />
-              </label>
+
+              {/* INPUT TANGGAL SOAL & TOMBOL UPLOAD */}
+              <div className="flex flex-wrap items-center gap-3">
+                <div className="flex items-center gap-2 bg-slate-50 px-3 py-1.5 rounded-xl border">
+                  <CalendarIcon className="w-4 h-4 text-indigo-600" />
+                  <label className="text-xs font-bold text-slate-700 whitespace-nowrap">Tanggal Soal:</label>
+                  <input
+                    type="date"
+                    value={uploadExamDate}
+                    onChange={(e) => setUploadExamDate(e.target.value)}
+                    className="px-2.5 py-1 border border-slate-300 rounded-lg text-xs bg-white font-semibold focus:outline-none focus:border-indigo-600"
+                  />
+                </div>
+
+                <label className="px-4 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold flex items-center gap-2 cursor-pointer shadow-sm">
+                  <Upload className="w-4 h-4" /> {isUploadingDoc ? 'Mengunggah...' : 'Upload Dokumen Soal'}
+                  <input
+                    type="file"
+                    accept=".doc,.docx,.pdf,.jpg,.png,.txt"
+                    className="hidden"
+                    onChange={(e) => {
+                      if (e.target.files && e.target.files[0]) {
+                        handleUploadTeacherExam(e.target.files[0], uploadExamDate);
+                        e.target.value = '';
+                      }
+                    }}
+                  />
+                </label>
+              </div>
             </div>
 
             {exams.length === 0 ? (
               <div className="bg-white rounded-2xl border p-10 text-center text-xs text-slate-400">
-                Belum ada dokumen soal yang di-upload. Klik tombol "Upload Dokumen Soal" di atas.
+                Belum ada dokumen soal yang di-upload. Tentukan tanggal soal lalu klik tombol "Upload Dokumen Soal" di atas.
               </div>
             ) : (
               <div className="grid md:grid-cols-2 gap-4">
@@ -1629,13 +1765,18 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
                     <div className="space-y-2">
                       <div className="flex items-start justify-between gap-2">
                         <div>
-                          <span className={`text-[11px] font-bold px-2 py-0.5 rounded border ${
-                            ex.title.startsWith('Pembetulan')
-                              ? 'bg-amber-50 text-amber-800 border-amber-200'
-                              : 'bg-indigo-50 text-indigo-700 border-indigo-100'
-                          }`}>
-                            {ex.subject || 'Bank Soal'}
-                          </span>
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <span className={`text-[11px] font-bold px-2 py-0.5 rounded border ${
+                              ex.title.startsWith('Pembetulan')
+                                ? 'bg-amber-50 text-amber-800 border-amber-200'
+                                : 'bg-indigo-50 text-indigo-700 border-indigo-100'
+                            }`}>
+                              {ex.subject || 'Bank Soal'}
+                            </span>
+                            <span className="text-[11px] font-bold text-slate-600 bg-slate-100 px-2 py-0.5 rounded">
+                              📅 {formatDateIndo(ex.examDate || ex.dateKey)}
+                            </span>
+                          </div>
                           <h3 className="font-bold text-base text-slate-900 mt-1.5">{ex.title}</h3>
                         </div>
                         <button onClick={() => handleDeleteExam(ex.id)} className="p-1.5 text-rose-500 hover:bg-rose-50 rounded-lg" title="Hapus Soal">
@@ -1657,7 +1798,7 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
                         <Eye className="w-3.5 h-3.5" /> Lihat
                       </button>
                       <button onClick={() => handleOpenEditExam(ex)} className="flex-1 py-2 px-3 bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5">
-                        <Edit3 className="w-3.5 h-3.5" /> Edit Soal
+                        <Edit3 className="w-3.5 h-3.5" /> Edit Soal & Tanggal
                       </button>
                       <button onClick={() => handleDownloadExam(ex, 'doc')} className="py-2 px-3 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-xl text-xs font-bold flex items-center justify-center gap-1" title="Download sebagai DOC">
                         <Download className="w-3.5 h-3.5" /> DOC
@@ -1673,7 +1814,7 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
           </div>
         )}
 
-        {/* TAB 3: SCAN KOREKSI AI VISION */}
+        {/* TAB 3: SCAN KOREKSI AI VISION (DENGAN PILIHAN TANGGAL PENGERJAAN) */}
         {activeTab === 'scanner' && (
           <div className="max-w-3xl mx-auto space-y-6">
             <div className="bg-white rounded-2xl border p-6 shadow-sm space-y-5">
@@ -1682,8 +1823,8 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
                   <Sparkles className="w-5 h-5 text-indigo-600" /> Smart Scan Koreksi Lembar Jawaban (Gemini Vision)
                 </h2>
                 <p className="text-xs text-slate-500 mt-1">
-                  AI membaca lembar jawaban siswa berdasarkan <strong>4 Aturan Warna & Tanda Koreksi</strong>:
-                  Silang merah saja (Salah), Silang merah+biru ada kata salah (Salah), Silang merah+biru tanpa kata salah (Sudah Dibenarkan), dan Lingkaran merah (Benar Kurang Lengkap).
+                  Pilih tanggal pengerjaan/les yang sesuai (bisa memilih tanggal kemarin jika baru sempat diunggah sekarang).
+                  Hasil scan akan otomatis dicocokkan ke Kalender tanggal tersebut.
                 </p>
               </div>
 
@@ -1719,24 +1860,34 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
                 </div>
               </div>
 
-              <div className="grid sm:grid-cols-2 gap-4">
+              {/* FORM SELEKSI: SISWA, PAKET SOAL, & TANGGAL PENGERJAAN */}
+              <div className="grid sm:grid-cols-3 gap-3">
                 <div>
                   <label className="block text-xs font-bold text-slate-700 mb-1.5">Pilih Siswa</label>
-                  <select value={scanStudentId} onChange={(e) => setScanStudentId(e.target.value)} className="w-full px-3.5 py-2.5 border rounded-xl text-sm bg-white">
+                  <select value={scanStudentId} onChange={(e) => setScanStudentId(e.target.value)} className="w-full px-3.5 py-2.5 border rounded-xl text-sm bg-white font-medium">
                     <option value="">-- Pilih Siswa --</option>
                     {students.map((s) => <option key={s.id} value={s.id}>{s.name} ({s.class})</option>)}
                   </select>
                 </div>
                 <div>
                   <label className="block text-xs font-bold text-slate-700 mb-1.5">Paket Soal Acuan</label>
-                  <select value={scanExamId} onChange={(e) => setScanExamId(e.target.value)} className="w-full px-3.5 py-2.5 border rounded-xl text-sm bg-white">
+                  <select value={scanExamId} onChange={(e) => setScanExamId(e.target.value)} className="w-full px-3.5 py-2.5 border rounded-xl text-sm bg-white font-medium">
                     <option value="">-- Pilih Paket Soal --</option>
                     {exams.map((ex) => (
                       <option key={ex.id} value={ex.id}>
-                        {ex.title} (Upload: {ex.uploadDate || '-'})
+                        {ex.title} ({formatDateIndo(ex.examDate || ex.dateKey)})
                       </option>
                     ))}
                   </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1.5">Tanggal Pengerjaan / Les</label>
+                  <input
+                    type="date"
+                    value={scanDate}
+                    onChange={(e) => setScanDate(e.target.value)}
+                    className="w-full px-3 py-2 border rounded-xl text-sm bg-white font-semibold focus:outline-none focus:border-indigo-600"
+                  />
                 </div>
               </div>
 
@@ -1747,7 +1898,9 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
                 <span className="text-sm font-bold text-indigo-900">
                   {isScanning ? 'Sedang Menganalisis Tinta Koreksi dengan AI Vision...' : 'Ambil Foto / Upload Lembar Jawaban Siswa'}
                 </span>
-                <span className="text-xs text-slate-500 mt-1">Format JPG, PNG, atau Kamera HP langsung</span>
+                <span className="text-xs text-slate-500 mt-1">
+                  Jawaban akan dicatat untuk tanggal: <strong>{formatDateIndo(scanDate)}</strong>
+                </span>
                 <input
                   type="file"
                   accept="image/*"
@@ -1775,7 +1928,9 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
                     <h3 className="font-bold text-base text-slate-900 mt-1">
                       {lastScanResult.student?.name} • {lastScanResult.exam?.title}
                     </h3>
-                    <p className="text-xs text-slate-500">Waktu Scan: {lastScanResult.submission.date}</p>
+                    <p className="text-xs text-slate-500">
+                      Tanggal Les / Soal: <strong>{formatDateIndo(lastScanResult.submission.examDate)}</strong> • Dicatat pada: {lastScanResult.submission.date}
+                    </p>
                   </div>
                   <div className="text-right">
                     <span className="text-xs text-slate-500 block">Skor Akhir:</span>
@@ -1859,7 +2014,397 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
           </div>
         )}
 
-        {/* TAB 4: EVALUASI & REKAP BULANAN */}
+        {/* ============================================================== */}
+        {/* TAB 4: KALENDER SINKRONISASI (HADIR, BANK SOAL, JAWABAN TERUPLOAD) */}
+        {/* ============================================================== */}
+        {activeTab === 'calendar' && (
+          <div className="space-y-6">
+            <div className="bg-white rounded-2xl border p-6 shadow-sm space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-3 border-b pb-4">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-indigo-50 border border-indigo-200 text-indigo-700 flex items-center justify-center font-bold">
+                    <CalendarIcon className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h2 className="font-bold text-lg text-slate-900">
+                      Kalender Aktivitas & Rekap Harian ({MONTHS_ID[calMonthIdx]} {calYear})
+                    </h2>
+                    <p className="text-xs text-slate-500">
+                      Sinkronisasi kehadiran siswa, ketersediaan Bank Soal, dan jumlah jawaban yang telah diunggah.
+                    </p>
+                  </div>
+                </div>
+
+                {/* Navigasi Bulan Kalender */}
+                <div className="flex items-center gap-1.5 bg-slate-50 p-1.5 rounded-xl border">
+                  <button
+                    onClick={() => {
+                      if (calMonthIdx === 0) {
+                        setCalMonthIdx(11);
+                        setCalYear(y => y - 1);
+                      } else {
+                        setCalMonthIdx(m => m - 1);
+                      }
+                    }}
+                    className="p-1.5 rounded-lg hover:bg-white text-slate-600 transition-all"
+                    title="Bulan Sebelumnya"
+                  >
+                    <ChevronLeft className="w-4 h-4" />
+                  </button>
+                  <button
+                    onClick={() => {
+                      setCalMonthIdx(now.getMonth());
+                      setCalYear(now.getFullYear());
+                      setSelectedCalDate(todayKey);
+                    }}
+                    className="px-3 py-1 rounded-lg text-xs font-bold bg-white text-indigo-700 border shadow-xs"
+                  >
+                    Hari Ini
+                  </button>
+                  <button
+                    onClick={() => {
+                      if (calMonthIdx === 11) {
+                        setCalMonthIdx(0);
+                        setCalYear(y => y + 1);
+                      } else {
+                        setCalMonthIdx(m => m + 1);
+                      }
+                    }}
+                    className="p-1.5 rounded-lg hover:bg-white text-slate-600 transition-all"
+                    title="Bulan Berikutnya"
+                  >
+                    <ChevronRight className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+
+              {/* Grid Nama Hari */}
+              <div className="grid grid-cols-7 gap-2 text-center text-xs font-bold text-slate-500 py-1">
+                {DAYS_ID.map((d, i) => (
+                  <div key={d} className={`py-1 ${i === 0 ? 'text-rose-500' : ''}`}>
+                    {d}
+                  </div>
+                ))}
+              </div>
+
+              {/* Grid Tanggal Kalender */}
+              <div className="grid grid-cols-7 gap-2">
+                {/* Spacer hari pertama */}
+                {Array.from({ length: firstDayOfWeek }).map((_, i) => (
+                  <div key={`empty-${i}`} className="min-h-[105px] rounded-xl bg-slate-50/40 border border-dashed border-slate-200/60 opacity-40"></div>
+                ))}
+
+                {calendarDays.map((dayNum) => {
+                  const dKey = `${calYear}-${String(calMonthIdx + 1).padStart(2, '0')}-${String(dayNum).padStart(2, '0')}`;
+                  const isToday = dKey === todayKey;
+                  const isSelected = selectedCalDate === dKey;
+
+                  // 1. Hitung Kehadiran Siswa
+                  const dayRecs = attendanceRecords[dKey] || {};
+                  const presentStudentIds = Object.entries(dayRecs)
+                    .filter(([_, st]) => st === 'Hadir')
+                    .map(([id]) => id);
+                  const presentCount = presentStudentIds.length;
+
+                  // 2. Cek Ketersediaan Bank Soal pada Tanggal Ini
+                  const dayExams = exams.filter(e => (
+                    e.examDate === dKey || e.dateKey === dKey || normalizeDateKey(e.uploadDate) === dKey
+                  ));
+                  const hasExam = dayExams.length > 0;
+
+                  // 3. Hitung Jumlah Jawaban Terupload (Siswa Unik)
+                  const daySubs = submissions.filter(s => (
+                    s.examDate === dKey || s.dateKey === dKey || normalizeDateKey(s.date) === dKey
+                  ));
+                  const distinctStudentIdsWithAnswers = Array.from(new Set(daySubs.map(s => s.studentId)));
+                  const uploadedCount = distinctStudentIdsWithAnswers.length;
+
+                  // 4. Hitung Peringatan Selisih (Hadir > Jawaban Terupload)
+                  const selisih = presentCount - uploadedCount;
+                  const hasGapWarning = presentCount > 0 && selisih > 0;
+
+                  return (
+                    <button
+                      key={dayNum}
+                      onClick={() => setSelectedCalDate(dKey)}
+                      className={`min-h-[110px] p-2.5 rounded-xl border text-left flex flex-col justify-between transition-all ${
+                        isSelected
+                          ? 'border-indigo-600 bg-indigo-50/70 shadow-sm ring-2 ring-indigo-200'
+                          : isToday
+                          ? 'border-amber-400 bg-amber-50/40 hover:bg-amber-50'
+                          : 'bg-white hover:bg-slate-50 border-slate-200'
+                      }`}
+                    >
+                      {/* Tanggal & Hari Ini Indicator */}
+                      <div className="flex items-center justify-between">
+                        <span className={`text-sm font-extrabold ${isToday ? 'text-indigo-700' : 'text-slate-800'}`}>
+                          {dayNum}
+                        </span>
+                        {isToday && (
+                          <span className="text-[9px] font-bold text-amber-700 bg-amber-100 px-1 rounded">
+                            Hari Ini
+                          </span>
+                        )}
+                      </div>
+
+                      {/* Informasi Ringkas: Hadir, Soal, Jawaban, & Selisih */}
+                      <div className="space-y-1 my-1">
+                        {/* Status Hadir */}
+                        {presentCount > 0 ? (
+                          <span className="text-[10px] font-bold text-emerald-800 bg-emerald-100 px-1.5 py-0.5 rounded block truncate">
+                            {presentCount} Hadir
+                          </span>
+                        ) : (
+                          <span className="text-[10px] text-slate-400 block truncate">
+                            0 Hadir
+                          </span>
+                        )}
+
+                        {/* Status Bank Soal */}
+                        {hasExam ? (
+                          <span className="text-[9px] font-semibold text-indigo-700 bg-indigo-100/70 border border-indigo-200 px-1.5 py-0.5 rounded block truncate">
+                            ✓ Soal Ada ({dayExams.length})
+                          </span>
+                        ) : presentCount > 0 ? (
+                          <span className="text-[9px] font-semibold text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded block truncate">
+                            Belum diupload
+                          </span>
+                        ) : null}
+
+                        {/* Jumlah Jawaban */}
+                        {presentCount > 0 && (
+                          <span className="text-[9px] font-medium text-slate-600 block truncate">
+                            {uploadedCount} / {presentCount} jawaban
+                          </span>
+                        )}
+                      </div>
+
+                      {/* Badge Peringatan Selisih */}
+                      {hasGapWarning ? (
+                        <span className="text-[9px] font-bold text-rose-700 bg-rose-100 border border-rose-300 px-1.5 py-0.5 rounded block text-center truncate">
+                          Kurang {selisih} jawaban
+                        </span>
+                      ) : presentCount > 0 ? (
+                        <span className="text-[9px] font-bold text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded block text-center truncate">
+                          ✓ Lengkap
+                        </span>
+                      ) : (
+                        <span className="text-[9px] text-slate-300 block text-center">-</span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* PANEL DETAIL TANGGAL TERPILIH */}
+            {selectedCalDate && (() => {
+              const dKey = selectedCalDate;
+              const dayRecs = attendanceRecords[dKey] || {};
+              const presentStudentIds = Object.entries(dayRecs)
+                .filter(([_, st]) => st === 'Hadir')
+                .map(([id]) => id);
+              const presentCount = presentStudentIds.length;
+              const izinCount = Object.values(dayRecs).filter(st => st === 'Izin').length;
+              const tidakHadirCount = Object.values(dayRecs).filter(st => st === 'Tidak Hadir').length;
+
+              const dayExams = exams.filter(e => (
+                e.examDate === dKey || e.dateKey === dKey || normalizeDateKey(e.uploadDate) === dKey
+              ));
+              const hasExam = dayExams.length > 0;
+
+              const daySubs = submissions.filter(s => (
+                s.examDate === dKey || s.dateKey === dKey || normalizeDateKey(s.date) === dKey
+              ));
+              const distinctStudentIdsWithAnswers = Array.from(new Set(daySubs.map(s => s.studentId)));
+              const uploadedCount = distinctStudentIdsWithAnswers.length;
+
+              // Siswa hadir yang belum memiliki rekaman jawaban (submissions)
+              const missingStudentIds = presentStudentIds.filter(id => !distinctStudentIdsWithAnswers.includes(id));
+              const missingStudents = students.filter(s => missingStudentIds.includes(s.id));
+
+              return (
+                <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm space-y-5">
+                  <div className="flex flex-wrap items-center justify-between gap-3 border-b pb-4">
+                    <div>
+                      <span className="text-xs font-bold text-indigo-700 bg-indigo-50 px-2.5 py-0.5 rounded-md border border-indigo-100">
+                        Detail Aktivitas Harian
+                      </span>
+                      <h3 className="font-extrabold text-lg text-slate-900 mt-1">
+                        {formatDateIndo(selectedCalDate)}
+                      </h3>
+                      <p className="text-xs text-slate-500">
+                        Sinkronisasi kehadiran, paket soal Bank Soal, dan jawaban lembar kerja siswa.
+                      </p>
+                    </div>
+
+                    {/* Ringkasan Angka Cepat */}
+                    <div className="flex flex-wrap gap-2 text-xs">
+                      <div className="bg-emerald-50 border border-emerald-200 px-3 py-1.5 rounded-xl text-center">
+                        <span className="text-[10px] text-emerald-700 font-semibold uppercase block">Hadir</span>
+                        <strong className="text-base text-emerald-800">{presentCount}</strong>
+                      </div>
+                      <div className="bg-indigo-50 border border-indigo-200 px-3 py-1.5 rounded-xl text-center">
+                        <span className="text-[10px] text-indigo-700 font-semibold uppercase block">Bank Soal</span>
+                        <strong className="text-base text-indigo-800">{dayExams.length}</strong>
+                      </div>
+                      <div className="bg-amber-50 border border-amber-200 px-3 py-1.5 rounded-xl text-center">
+                        <span className="text-[10px] text-amber-700 font-semibold uppercase block">Jawaban Masuk</span>
+                        <strong className="text-base text-amber-800">{uploadedCount} / {presentCount}</strong>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* 1. PERINGATAN SELISIH & DAFTAR SISWA HADIR YANG BELUM UPLOAD JAWABAN */}
+                  {presentCount > 0 && missingStudents.length > 0 && (
+                    <div className="p-4 rounded-xl bg-rose-50 border border-rose-200 space-y-3">
+                      <div className="flex items-center gap-2">
+                        <AlertCircle className="w-5 h-5 text-rose-600 shrink-0" />
+                        <div>
+                          <h4 className="font-bold text-sm text-rose-900">
+                            Perhatian: Terdapat {missingStudents.length} siswa hadir yang jawabannya belum diunggah!
+                          </h4>
+                          <p className="text-xs text-rose-700">
+                            Siswa tercatat hadir di absensi namun lembar jawabannya belum selesai discan atau diunggah.
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="flex flex-wrap gap-2 pt-1">
+                        {missingStudents.map((std) => (
+                          <div
+                            key={std.id}
+                            className="bg-white border border-rose-300 px-3 py-1.5 rounded-xl flex items-center justify-between gap-3 shadow-xs text-xs"
+                          >
+                            <div>
+                              <span className="font-bold text-slate-800">{std.name}</span>
+                              <span className="text-[11px] text-slate-500 ml-1">({std.class})</span>
+                            </div>
+                            <button
+                              onClick={() => {
+                                setScanStudentId(std.id);
+                                setScanDate(selectedCalDate);
+                                setActiveTab('scanner');
+                              }}
+                              className="px-2.5 py-1 bg-rose-600 hover:bg-rose-700 text-white rounded-lg font-bold text-[10px] flex items-center gap-1 shadow-xs"
+                            >
+                              <Camera className="w-3 h-3" /> Scan Sekarang
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 2. STATUS BANK SOAL PADA TANGGAL INI */}
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <h4 className="font-bold text-xs uppercase tracking-wider text-slate-700 flex items-center gap-1.5">
+                        <FileText className="w-4 h-4 text-indigo-600" /> Paket Soal di Bank Soal ({dayExams.length})
+                      </h4>
+                      <button
+                        onClick={() => {
+                          setUploadExamDate(selectedCalDate);
+                          setActiveTab('exams');
+                        }}
+                        className="text-xs font-bold text-indigo-600 hover:text-indigo-800 flex items-center gap-1"
+                      >
+                        + Upload Soal untuk Tanggal Ini <ArrowRight className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+
+                    {dayExams.length === 0 ? (
+                      <div className="p-4 rounded-xl bg-slate-50 border text-xs text-slate-500 text-center">
+                        Belum ada paket soal yang diunggah khusus untuk tanggal {formatDateIndo(selectedCalDate)}.
+                      </div>
+                    ) : (
+                      <div className="grid sm:grid-cols-2 gap-3 text-xs">
+                        {dayExams.map((ex) => (
+                          <div key={ex.id} className="p-3.5 rounded-xl border bg-slate-50 flex items-center justify-between gap-2">
+                            <div>
+                              <span className="font-bold text-slate-900 block">{ex.title}</span>
+                              <span className="text-[11px] text-slate-500">{ex.subject} • {(ex.questions || []).length} butir soal</span>
+                            </div>
+                            <div className="flex items-center gap-1">
+                              <button
+                                onClick={() => setViewingExamModal(ex)}
+                                className="px-2 py-1 bg-white border rounded-lg text-slate-700 font-semibold hover:bg-slate-100 text-[11px]"
+                              >
+                                Lihat
+                              </button>
+                              <button
+                                onClick={() => handleOpenEditExam(ex)}
+                                className="px-2 py-1 bg-amber-50 border border-amber-200 rounded-lg text-amber-800 font-semibold hover:bg-amber-100 text-[11px]"
+                              >
+                                Edit
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* 3. DAFTAR SISWA YANG SUDAH UPLOAD JAWABAN */}
+                  <div className="space-y-3 pt-2 border-t">
+                    <h4 className="font-bold text-xs uppercase tracking-wider text-slate-700 flex items-center gap-1.5">
+                      <CheckCircle2 className="w-4 h-4 text-emerald-600" /> Jawaban Siswa Masuk ({daySubs.length} lembar kerja)
+                    </h4>
+
+                    {daySubs.length === 0 ? (
+                      <div className="p-4 rounded-xl bg-slate-50 border text-xs text-slate-500 text-center">
+                        Belum ada jawaban siswa yang diunggah atau discan untuk tanggal ini.
+                      </div>
+                    ) : (
+                      <div className="grid sm:grid-cols-2 gap-2 text-xs">
+                        {daySubs.map((sub) => {
+                          const std = students.find(s => s.id === sub.studentId);
+                          const ex = exams.find(e => e.id === sub.examId);
+                          return (
+                            <div key={sub.id} className="p-3 rounded-xl border bg-white flex items-center justify-between gap-2 shadow-xs">
+                              <div>
+                                <span className="font-bold text-slate-900 block">{std?.name || 'Siswa'} ({std?.class})</span>
+                                <span className="text-[11px] text-slate-500">{ex?.title || 'Paket Soal'}</span>
+                              </div>
+                              <span className="px-2.5 py-1 rounded-lg bg-indigo-50 border border-indigo-100 text-indigo-700 font-bold text-xs">
+                                Skor: {sub.score}
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* 4. DAFTAR REKAP PRESENSI HARI INI */}
+                  <div className="space-y-2 pt-2 border-t text-xs">
+                    <h4 className="font-bold text-slate-700">Status Presensi Siswa ({Object.keys(dayRecs).length} siswa tercatat):</h4>
+                    <div className="flex flex-wrap gap-2">
+                      {students.map((std) => {
+                        const st = dayRecs[std.id];
+                        if (!st) return null;
+                        return (
+                          <span
+                            key={std.id}
+                            className={`px-2.5 py-1 rounded-lg font-medium border ${
+                              st === 'Hadir' ? 'bg-emerald-50 text-emerald-800 border-emerald-200' :
+                              st === 'Izin' ? 'bg-amber-50 text-amber-800 border-amber-200' :
+                              'bg-rose-50 text-rose-800 border-rose-200'
+                            }`}
+                          >
+                            {std.name}: <strong>{st}</strong>
+                          </span>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
+          </div>
+        )}
+
+        {/* TAB 5: EVALUASI & REKAP BULANAN */}
         {activeTab === 'evaluations' && (
           <div className="space-y-5">
             <div className="bg-white rounded-2xl border p-6 shadow-sm flex flex-wrap justify-between items-center gap-4">
@@ -1961,7 +2506,7 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
                             </span>
                           </div>
                           <span className="text-[11px] text-slate-500 font-medium">
-                            {ev.dateKey || '-'}
+                            {formatDateIndo(ev.dateKey) || ev.dateKey || '-'}
                           </span>
                         </div>
 
@@ -1991,7 +2536,7 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
                             <button
                               onClick={() => {
                                 const waNum = formatWaNumber(studentObj.whatsapp);
-                                const textMsg = `Halo ${studentObj.parentName}, berikut catatan evaluasi belajar ananda *${studentObj.name}* (${ev.dateKey}):\n\n${ev.summaryText}\n\n- Bimbel Albita`;
+                                const textMsg = `Halo ${studentObj.parentName}, berikut catatan evaluasi belajar ananda *${studentObj.name}* (${formatDateIndo(ev.dateKey)}):\n\n${ev.summaryText}\n\n- Bimbel Albita`;
                                 window.open(`https://wa.me/${waNum}?text=${encodeURIComponent(textMsg)}`, '_blank', 'noopener,noreferrer');
                               }}
                               className="px-3 py-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 rounded-xl text-xs font-bold flex items-center gap-1.5"
@@ -2024,7 +2569,7 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
           </div>
         )}
 
-        {/* TAB 5: ABSENSI HARIAN (TOMBOL SIMPAN & WA TERPISAH) */}
+        {/* TAB 6: ABSENSI HARIAN (TOMBOL SIMPAN & WA TERPISAH) */}
         {activeTab === 'attendance' && (
           <div className="bg-white rounded-2xl border p-6 shadow-sm space-y-4">
             <div className="flex flex-wrap justify-between items-center gap-2 border-b pb-3">
@@ -2105,51 +2650,6 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
                 );
               })}
             </div>
-          </div>
-        )}
-
-        {/* TAB 6: KALENDER KEHADIRAN */}
-        {activeTab === 'calendar' && (
-          <div className="bg-white rounded-2xl border p-6 shadow-sm space-y-4">
-            <h2 className="font-bold text-lg text-slate-900 flex items-center gap-2">
-              <CalendarIcon className="w-5 h-5 text-indigo-600" /> Kalender Kehadiran ({currentMonthName} {currentYear})
-            </h2>
-            <div className="grid grid-cols-7 gap-2">
-              {calendarDays.map((dayNum) => {
-                const dKey = `${currentYear}-${String(currentMonthIdx + 1).padStart(2, '0')}-${String(dayNum).padStart(2, '0')}`;
-                const dayRecs = attendanceRecords[dKey] || {};
-                const presentCount = Object.values(dayRecs).filter((v) => v === 'Hadir').length;
-                return (
-                  <button
-                    key={dayNum}
-                    onClick={() => setSelectedCalDate(dKey)}
-                    className={`p-3 rounded-xl border text-left transition-all ${
-                      selectedCalDate === dKey ? 'border-indigo-600 bg-indigo-50' : 'bg-slate-50 hover:bg-white'
-                    }`}
-                  >
-                    <span className="font-bold text-sm text-slate-800 block">{dayNum}</span>
-                    {presentCount > 0 && (
-                      <span className="text-[10px] font-bold text-emerald-700 bg-emerald-100 px-1.5 py-0.5 rounded mt-1 inline-block">
-                        {presentCount} Hadir
-                      </span>
-                    )}
-                  </button>
-                );
-              })}
-            </div>
-            {selectedCalDate && (
-              <div className="p-4 rounded-xl bg-slate-50 border text-xs space-y-1">
-                <p className="font-bold text-slate-800">Detail Tanggal: {selectedCalDate}</p>
-                {Object.keys(attendanceRecords[selectedCalDate] || {}).length === 0 ? (
-                  <p className="text-slate-500">Tidak ada catatan absensi pada tanggal ini.</p>
-                ) : (
-                  Object.entries(attendanceRecords[selectedCalDate]).map(([sId, st]) => {
-                    const sName = students.find((s) => s.id === sId)?.name || sId;
-                    return <p key={sId}>• {sName}: <strong>{st}</strong></p>;
-                  })
-                )}
-              </div>
-            )}
           </div>
         )}
 
@@ -2305,7 +2805,9 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
             <div className="flex justify-between items-start border-b pb-3">
               <div>
                 <h3 className="font-bold text-base text-slate-900">{viewingExamModal.title}</h3>
-                <p className="text-xs text-slate-500 mt-0.5">Tanggal Upload: <strong>{viewingExamModal.uploadDate || '-'}</strong> • {viewingExamModal.subject || 'Bank Soal'}</p>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Tanggal Soal: <strong>{formatDateIndo(viewingExamModal.examDate || viewingExamModal.dateKey) || viewingExamModal.uploadDate || '-'}</strong> • {viewingExamModal.subject || 'Bank Soal'}
+                </p>
               </div>
               <button onClick={() => setViewingExamModal(null)}><X className="w-4 h-4" /></button>
             </div>
@@ -2365,26 +2867,36 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
         </div>
       )}
 
-      {/* MODAL EDIT SOAL KHUSUS PENGAJAR */}
+      {/* MODAL EDIT SOAL KHUSUS PENGAJAR (DENGAN EDIT TANGGAL SOAL) */}
       {editingExamModal && (
         <div className="fixed inset-0 bg-slate-900/50 z-50 flex items-center justify-center p-4">
           <form onSubmit={handleSaveEditedExam} className="bg-white rounded-2xl max-w-2xl w-full p-6 space-y-4 shadow-xl max-h-[90vh] flex flex-col">
             <div className="flex justify-between items-center border-b pb-3">
               <div>
-                <h3 className="font-bold text-base text-slate-900">Edit Paket Soal (Hak Akses Pengajar)</h3>
-                <p className="text-[11px] text-slate-500">Diupload pada: {editingExamModal.uploadDate || '-'}</p>
+                <h3 className="font-bold text-base text-slate-900">Edit Paket Soal & Tanggal</h3>
+                <p className="text-[11px] text-slate-500">Ubah tanggal pelaksanaan soal, judul, dan rincian pertanyaan</p>
               </div>
               <button type="button" onClick={() => setEditingExamModal(null)}><X className="w-4 h-4" /></button>
             </div>
 
             <div className="overflow-y-auto space-y-4 flex-1 pr-1 text-xs">
-              <div className="grid sm:grid-cols-2 gap-3">
+              <div className="grid sm:grid-cols-3 gap-3">
+                <div>
+                  <label className="block font-bold mb-1">Tanggal Soal</label>
+                  <input
+                    type="date"
+                    value={editExamDate}
+                    onChange={(e) => setEditExamDate(e.target.value)}
+                    className="w-full px-3 py-2 border rounded-xl bg-white font-semibold focus:outline-none focus:border-indigo-600"
+                    required
+                  />
+                </div>
                 <div>
                   <label className="block font-bold mb-1">Judul Paket Soal</label>
                   <input type="text" value={editExamTitle} onChange={(e) => setEditExamTitle(e.target.value)} className="w-full px-3 py-2 border rounded-xl" required />
                 </div>
                 <div>
-                  <label className="block font-bold mb-1">Mata Pelajaran / Kategori</label>
+                  <label className="block font-bold mb-1">Mata Pelajaran</label>
                   <input type="text" value={editExamSubject} onChange={(e) => setEditExamSubject(e.target.value)} className="w-full px-3 py-2 border rounded-xl" />
                 </div>
               </div>
@@ -2444,7 +2956,9 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
                   Paket Soal Pembetulan (Remedial AI)
                 </span>
                 <h3 className="font-bold text-base text-slate-900 mt-1">{remedialModal.remedialTitle}</h3>
-                <p className="text-xs text-slate-500">Siswa: {remedialModal.studentName} • Materi Sejenis dari Soal yang Salah</p>
+                <p className="text-xs text-slate-500">
+                  Siswa: {remedialModal.studentName} • Tanggal Soal: {formatDateIndo(remedialModal.examDate)}
+                </p>
               </div>
               <button onClick={() => setRemedialModal(null)}><X className="w-4 h-4" /></button>
             </div>
