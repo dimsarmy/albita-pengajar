@@ -1,9 +1,10 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { createClient } from '@supabase/supabase-js';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import mammoth from 'mammoth';
 import { Document, Packer, Paragraph, TextRun, HeadingLevel } from 'docx';
 import jsPDF from 'jspdf';
+import { getDailyCalendarSummary } from './utils/calendarSummary';
 import {
   Camera,
   Upload,
@@ -154,6 +155,23 @@ export default function App() {
       return {};
     }
   });
+
+  // Array data absensi terformat untuk kalkulasi ringkasan kalender
+  const attendanceList = useMemo(() => {
+    const list = [];
+    Object.entries(attendanceRecords).forEach(([dKey, stdMap]) => {
+      if (stdMap && typeof stdMap === 'object') {
+        Object.entries(stdMap).forEach(([studentId, status]) => {
+          list.push({
+            date_key: dKey,
+            student_id: studentId,
+            status: status
+          });
+        });
+      }
+    });
+    return list;
+  }, [attendanceRecords]);
 
   const [payments, setPayments] = useState({});
   const [teacherNotes, setTeacherNotes] = useState({});
@@ -2099,29 +2117,23 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
                   const isToday = dKey === todayKey;
                   const isSelected = selectedCalDate === dKey;
 
-                  // 1. Hitung Kehadiran Siswa
-                  const dayRecs = attendanceRecords[dKey] || {};
-                  const presentStudentIds = Object.entries(dayRecs)
-                    .filter(([_, st]) => st === 'Hadir')
-                    .map(([id]) => id);
-                  const presentCount = presentStudentIds.length;
-
-                  // 2. Cek Ketersediaan Bank Soal pada Tanggal Ini
-                  const dayExams = exams.filter(e => (
-                    e.examDate === dKey || e.dateKey === dKey || normalizeDateKey(e.uploadDate) === dKey
-                  ));
-                  const hasExam = dayExams.length > 0;
-
-                  // 3. Hitung Jumlah Jawaban Terupload (Siswa Unik)
-                  const daySubs = submissions.filter(s => (
-                    s.examDate === dKey || s.dateKey === dKey || normalizeDateKey(s.date) === dKey
-                  ));
-                  const distinctStudentIdsWithAnswers = Array.from(new Set(daySubs.map(s => s.studentId)));
-                  const uploadedCount = distinctStudentIdsWithAnswers.length;
-
-                  // 4. Hitung Peringatan Selisih (Hadir > Jawaban Terupload)
-                  const selisih = presentCount - uploadedCount;
-                  const hasGapWarning = presentCount > 0 && selisih > 0;
+                  // Hitung ringkasan harian kalender via getDailyCalendarSummary
+                  const summary = getDailyCalendarSummary(
+                    dKey,
+                    attendanceList,
+                    exams,
+                    submissions,
+                    students
+                  );
+                  const {
+                    hadirCount,
+                    hasBankSoal,
+                    bankSoalStatus,
+                    bankSoalCount,
+                    uploadedCount,
+                    missingCount
+                  } = summary;
+                  const hasGapWarning = hadirCount > 0 && missingCount > 0;
 
                   return (
                     <button
@@ -2150,9 +2162,9 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
                       {/* Informasi Ringkas: Hadir, Soal, Jawaban, & Selisih */}
                       <div className="space-y-1 my-1">
                         {/* Status Hadir */}
-                        {presentCount > 0 ? (
+                        {hadirCount > 0 ? (
                           <span className="text-[10px] font-bold text-emerald-800 bg-emerald-100 px-1.5 py-0.5 rounded block truncate">
-                            {presentCount} Hadir
+                            {hadirCount} Hadir
                           </span>
                         ) : (
                           <span className="text-[10px] text-slate-400 block truncate">
@@ -2161,20 +2173,20 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
                         )}
 
                         {/* Status Bank Soal */}
-                        {hasExam ? (
-                          <span className="text-[9px] font-semibold text-indigo-700 bg-indigo-100/70 border border-indigo-200 px-1.5 py-0.5 rounded block truncate">
-                            ✓ Soal Ada ({dayExams.length})
+                        {hasBankSoal ? (
+                          <span className="text-[9px] font-semibold text-indigo-700 bg-indigo-100/70 border border-indigo-200 px-1.5 py-0.5 rounded block truncate" title={bankSoalStatus}>
+                            ✓ Soal Ada ({bankSoalCount})
                           </span>
-                        ) : presentCount > 0 ? (
+                        ) : hadirCount > 0 ? (
                           <span className="text-[9px] font-semibold text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded block truncate">
-                            Belum diupload
+                            {bankSoalStatus}
                           </span>
                         ) : null}
 
                         {/* Jumlah Jawaban */}
-                        {presentCount > 0 && (
+                        {hadirCount > 0 && (
                           <span className="text-[9px] font-medium text-slate-600 block truncate">
-                            {uploadedCount} / {presentCount} jawaban
+                            {uploadedCount} / {hadirCount} jawaban
                           </span>
                         )}
                       </div>
@@ -2182,9 +2194,9 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
                       {/* Badge Peringatan Selisih */}
                       {hasGapWarning ? (
                         <span className="text-[9px] font-bold text-rose-700 bg-rose-100 border border-rose-300 px-1.5 py-0.5 rounded block text-center truncate">
-                          Kurang {selisih} jawaban
+                          Kurang {missingCount} jawaban
                         </span>
-                      ) : presentCount > 0 ? (
+                      ) : hadirCount > 0 ? (
                         <span className="text-[9px] font-bold text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded block text-center truncate">
                           ✓ Lengkap
                         </span>
@@ -2200,28 +2212,46 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
             {/* PANEL DETAIL TANGGAL TERPILIH */}
             {selectedCalDate && (() => {
               const dKey = selectedCalDate;
+              const summary = getDailyCalendarSummary(
+                dKey,
+                attendanceList,
+                exams,
+                submissions,
+                students
+              );
+              const {
+                hadirCount,
+                bankSoalCount,
+                hasBankSoal,
+                bankSoalStatus,
+                uploadedCount,
+                missingCount,
+                missingStudents: missingStudentNames
+              } = summary;
+
               const dayRecs = attendanceRecords[dKey] || {};
-              const presentStudentIds = Object.entries(dayRecs)
-                .filter(([_, st]) => st === 'Hadir')
-                .map(([id]) => id);
-              const presentCount = presentStudentIds.length;
               const izinCount = Object.values(dayRecs).filter(st => st === 'Izin').length;
               const tidakHadirCount = Object.values(dayRecs).filter(st => st === 'Tidak Hadir').length;
 
               const dayExams = exams.filter(e => (
                 e.examDate === dKey || e.dateKey === dKey || normalizeDateKey(e.uploadDate) === dKey
               ));
-              const hasExam = dayExams.length > 0;
 
               const daySubs = submissions.filter(s => (
                 s.examDate === dKey || s.dateKey === dKey || normalizeDateKey(s.date) === dKey
               ));
-              const distinctStudentIdsWithAnswers = Array.from(new Set(daySubs.map(s => s.studentId)));
-              const uploadedCount = distinctStudentIdsWithAnswers.length;
+              const distinctStudentIdsWithAnswers = Array.from(new Set(daySubs.map(s => String(s.studentId || s.student_id))));
 
               // Siswa hadir yang belum memiliki rekaman jawaban (submissions)
-              const missingStudentIds = presentStudentIds.filter(id => !distinctStudentIdsWithAnswers.includes(id));
-              const missingStudents = students.filter(s => missingStudentIds.includes(s.id));
+              const presentRecords = attendanceList.filter((a) => {
+                const recordDate = a.date_key || a.dateKey || a.date || (a.created_at ? String(a.created_at).slice(0, 10) : "");
+                const status = String(a.status || "").toLowerCase();
+                return recordDate === dKey && (status === "hadir" || status === "present" || a.present === true);
+              });
+              const presentStudentIds = Array.from(new Set(presentRecords.map((a) => String(a.student_id || a.studentId))));
+              const missingStudents = students.filter(s =>
+                presentStudentIds.includes(String(s.id)) && !distinctStudentIdsWithAnswers.includes(String(s.id))
+              );
 
               return (
                 <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm space-y-5">
@@ -2234,7 +2264,7 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
                         {formatDateIndo(selectedCalDate)}
                       </h3>
                       <p className="text-xs text-slate-500">
-                        Sinkronisasi kehadiran, paket soal Bank Soal, dan jawaban lembar kerja siswa.
+                        Sinkronisasi kehadiran, paket soal Bank Soal ({bankSoalStatus}), dan jawaban lembar kerja siswa.
                       </p>
                     </div>
 
@@ -2242,27 +2272,27 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
                     <div className="flex flex-wrap gap-2 text-xs">
                       <div className="bg-emerald-50 border border-emerald-200 px-3 py-1.5 rounded-xl text-center">
                         <span className="text-[10px] text-emerald-700 font-semibold uppercase block">Hadir</span>
-                        <strong className="text-base text-emerald-800">{presentCount}</strong>
+                        <strong className="text-base text-emerald-800">{hadirCount}</strong>
                       </div>
                       <div className="bg-indigo-50 border border-indigo-200 px-3 py-1.5 rounded-xl text-center">
                         <span className="text-[10px] text-indigo-700 font-semibold uppercase block">Bank Soal</span>
-                        <strong className="text-base text-indigo-800">{dayExams.length}</strong>
+                        <strong className="text-base text-indigo-800">{bankSoalCount}</strong>
                       </div>
                       <div className="bg-amber-50 border border-amber-200 px-3 py-1.5 rounded-xl text-center">
                         <span className="text-[10px] text-amber-700 font-semibold uppercase block">Jawaban Masuk</span>
-                        <strong className="text-base text-amber-800">{uploadedCount} / {presentCount}</strong>
+                        <strong className="text-base text-amber-800">{uploadedCount} / {hadirCount}</strong>
                       </div>
                     </div>
                   </div>
 
                   {/* 1. PERINGATAN SELISIH & DAFTAR SISWA HADIR YANG BELUM UPLOAD JAWABAN */}
-                  {presentCount > 0 && missingStudents.length > 0 && (
+                  {hadirCount > 0 && missingCount > 0 && (
                     <div className="p-4 rounded-xl bg-rose-50 border border-rose-200 space-y-3">
                       <div className="flex items-center gap-2">
                         <AlertCircle className="w-5 h-5 text-rose-600 shrink-0" />
                         <div>
                           <h4 className="font-bold text-sm text-rose-900">
-                            Perhatian: Terdapat {missingStudents.length} siswa hadir yang jawabannya belum diunggah!
+                            Perhatian: Terdapat {missingCount} siswa hadir yang jawabannya belum diunggah!
                           </h4>
                           <p className="text-xs text-rose-700">
                             Siswa tercatat hadir di absensi namun lembar jawabannya belum selesai discan atau diunggah.
