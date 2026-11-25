@@ -165,7 +165,10 @@ const extractNumberedQuestionsFromText = (rawText = '', htmlFallback = '') => {
     .map((l) => l.replace(/\t+/g, ' ').replace(/\s+/g, ' ').trim())
     .filter(Boolean);
 
-  const sourceLines = htmlLines.length > 0 ? htmlLines : plainLines;
+  // Gabungkan atau pilih sumber baris yang lebih lengkap jumlah barisnya
+  const sourceLines = htmlLines.length >= plainLines.length && htmlLines.length > 0
+    ? htmlLines
+    : plainLines;
 
   let currentSection = '';
   let sectionRepeatCounter = 0;
@@ -235,13 +238,32 @@ const extractNumberedQuestionsFromText = (rawText = '', htmlFallback = '') => {
         topic: effectiveSection || 'Materi'
       };
     } else if (activeItem) {
-      // Lanjutan baris dari butir soal yang sama jika pecah ke baris baru
       activeItem.text += ` ${line}`;
+    } else if (line.length > 1) {
+      // Baris teks di luar nomor tetap ditangkap agar tidak ada soal yang hilang
+      items.push({
+        no: items.length + 1,
+        sectionLabel: currentSection || 'Catatan/Soal',
+        text: line,
+        answerKey: '',
+        topic: currentSection || 'Materi'
+      });
     }
   }
 
   flushActive();
   return items;
+};
+
+const mergeExamsList = (primaryList = [], secondaryList = []) => {
+  const map = new Map();
+  [...primaryList, ...secondaryList].forEach((ex) => {
+    if (!ex || !ex.id) return;
+    if (!map.has(ex.id)) {
+      map.set(ex.id, ex);
+    }
+  });
+  return Array.from(map.values());
 };
 
 export default function App() {
@@ -264,8 +286,39 @@ export default function App() {
   const isNearEndOfMonth = currentDateNum >= 25;
 
   const [students, setStudents] = useState([]);
-  const [exams, setExams] = useState([]);
-  const [submissions, setSubmissions] = useState([]);
+  const [exams, setExams] = useState(() => {
+    try {
+      const cached = localStorage.getItem('albita_exams');
+      return cached ? JSON.parse(cached) : [];
+    } catch {
+      return [];
+    }
+  });
+  const [submissions, setSubmissions] = useState(() => {
+    try {
+      const cached = localStorage.getItem('albita_submissions');
+      return cached ? JSON.parse(cached) : [];
+    } catch {
+      return [];
+    }
+  });
+
+  // Simpan setiap perubahan exams ke localStorage agar tidak hilang saat refresh
+  useEffect(() => {
+    try {
+      localStorage.setItem('albita_exams', JSON.stringify(exams));
+    } catch (err) {
+      console.warn('Gagal menyimpan cache exams ke localStorage:', err);
+    }
+  }, [exams]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('albita_submissions', JSON.stringify(submissions));
+    } catch (err) {
+      console.warn('Gagal menyimpan cache submissions ke localStorage:', err);
+    }
+  }, [submissions]);
 
   // Absensi dengan instant persistence (localStorage cache + Supabase Cloud Sync)
   const [attendanceRecords, setAttendanceRecords] = useState(() => {
@@ -334,33 +387,44 @@ export default function App() {
           paymentStatus: s.payment_status
         })));
 
-        const { data: exms } = await supabase.from('exams').select('*');
-        if (exms) setExams(exms.map(e => {
-          const normDate = e.exam_date || e.date_key || normalizeDateKey(e.upload_date || e.uploadDate) || todayKey;
-          return {
-            ...e,
-            fileName: e.file_name || e.fileName,
-            uploadDate: e.upload_date || e.uploadDate,
-            examDate: normDate,
-            dateKey: normDate,
-            docContent: e.doc_content || e.docContent || ''
-          };
-        }));
+        const { data: exms, error: exmErr } = await supabase.from('exams').select('*');
+        if (exmErr) {
+          console.warn('Gagal mengambil exams dari Supabase:', exmErr);
+        } else if (exms) {
+          const mappedExms = exms.map(e => {
+            const normDate = e.exam_date || e.date_key || normalizeDateKey(e.upload_date || e.uploadDate) || todayKey;
+            return {
+              ...e,
+              fileName: e.file_name || e.fileName,
+              uploadDate: e.upload_date || e.uploadDate,
+              examDate: normDate,
+              dateKey: normDate,
+              docContent: e.doc_content || e.docContent || '',
+              questions: Array.isArray(e.questions) ? e.questions : []
+            };
+          });
+          setExams(prev => mergeExamsList(mappedExms, prev));
+        }
 
-        const { data: subs } = await supabase.from('submissions').select('*');
-        if (subs) setSubmissions(subs.map(sub => {
-          const normDate = sub.exam_date || sub.date_key || normalizeDateKey(sub.date) || todayKey;
-          return {
-            id: sub.id,
-            studentId: sub.student_id,
-            examId: sub.exam_id,
-            date: sub.date,
-            examDate: normDate,
-            dateKey: normDate,
-            score: sub.score,
-            results: sub.results
-          };
-        }));
+        const { data: subs, error: subErr } = await supabase.from('submissions').select('*');
+        if (subErr) {
+          console.warn('Gagal mengambil submissions dari Supabase:', subErr);
+        } else if (subs) {
+          const mappedSubs = subs.map(sub => {
+            const normDate = sub.exam_date || sub.date_key || normalizeDateKey(sub.date) || todayKey;
+            return {
+              id: sub.id,
+              studentId: sub.student_id,
+              examId: sub.exam_id,
+              date: sub.date,
+              examDate: normDate,
+              dateKey: normDate,
+              score: sub.score,
+              results: Array.isArray(sub.results) ? sub.results : []
+            };
+          });
+          setSubmissions(prev => mergeExamsList(mappedSubs, prev));
+        }
 
         const { data: pays } = await supabase.from('payments').select('*');
         if (pays) {
@@ -381,7 +445,6 @@ export default function App() {
           setTeacherNotes(noteMap);
         }
 
-        // Fetch attendance records dari Supabase dan gabungkan dengan cache
         const { data: attRecs } = await supabase.from('attendance').select('*');
         if (attRecs) {
           const attMap = {};
@@ -396,7 +459,6 @@ export default function App() {
           });
         }
 
-        // Fetch evaluations dari Supabase
         const { data: evals } = await supabase.from('evaluations').select('*').order('created_at', { ascending: false });
         if (evals && evals.length > 0) {
           const mappedEvals = evals.map(e => ({
@@ -420,7 +482,6 @@ export default function App() {
 
     fetchAllData();
 
-    // REAL-TIME SUBSCRIPTION
     const attendanceChannel = supabase
       .channel('public:attendance')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'attendance' }, (payload) => {
@@ -876,12 +937,16 @@ export default function App() {
       questions: parsedQuestions
     };
 
-    setExams([newExam, ...exams]);
+    const nextExams = [newExam, ...exams];
+    setExams(nextExams);
+    try {
+      localStorage.setItem('albita_exams', JSON.stringify(nextExams));
+    } catch {}
     setIsUploadingDoc(false);
 
     if (supabase) {
       try {
-        await supabase.from('exams').insert({
+        const { error } = await supabase.from('exams').insert({
           id: newExam.id,
           title: newExam.title,
           file_name: newExam.fileName,
@@ -892,6 +957,9 @@ export default function App() {
           questions: newExam.questions,
           doc_content: newExam.docContent
         });
+        if (error) {
+          console.error('Gagal insert exam ke Supabase:', error);
+        }
       } catch (err) {
         console.warn('Gagal insert exam ke Supabase:', err);
       }
@@ -947,7 +1015,11 @@ export default function App() {
       questions: editExamQuestions
     };
 
-    setExams(exams.map((ex) => (ex.id === updatedExam.id ? updatedExam : ex)));
+    const nextExams = exams.map((ex) => (ex.id === updatedExam.id ? updatedExam : ex));
+    setExams(nextExams);
+    try {
+      localStorage.setItem('albita_exams', JSON.stringify(nextExams));
+    } catch {}
     setEditingExamModal(null);
 
     if (supabase) {
@@ -968,7 +1040,11 @@ export default function App() {
 
   const handleDeleteExam = async (examId) => {
     if (!window.confirm('Hapus paket soal ini dari Bank Soal?')) return;
-    setExams(exams.filter((e) => e.id !== examId));
+    const nextExams = exams.filter((e) => e.id !== examId);
+    setExams(nextExams);
+    try {
+      localStorage.setItem('albita_exams', JSON.stringify(nextExams));
+    } catch {}
     if (supabase) {
       await supabase.from('exams').delete().eq('id', examId);
     }
@@ -1059,7 +1135,7 @@ export default function App() {
   };
 
   // ==============================================================
-  // FITUR 1 & 2: SCAN KOREKSI JAWABAN SISWA (MEMBACA NOMOR ASLI DI KERTAS)
+  // FITUR 1 & 2: SCAN KOREKSI JAWABAN SISWA (MEMBACA SELURUH BUTIR & NOMOR ASLI)
   // ==============================================================
   const handleScanPhoto = async (imageFile) => {
     if (!scanStudentId) {
@@ -1092,7 +1168,7 @@ export default function App() {
       let scanErrorMessage = '';
 
       if (genAI && imageFile) {
-        const modelNames = ['gemini-2.5-flash'];
+        const modelNames = ['gemini-3.8-flash', 'gemini-2.5-flash'];
         const imagePart = await fileToGenerativePart(imageFile);
 
         const referenceBlock = targetExam
@@ -1100,7 +1176,7 @@ export default function App() {
           : '\nTidak ada paket soal acuan yang dipilih. Baca langsung seluruh butir soal bernomor yang terlihat di foto.';
 
         const prompt = `Kamu adalah AI ahli koreksi lembar jawaban siswa di Bimbel Albita.
-Tugasmu: Baca HANYA butir soal BERNOMOR yang terlihat pada foto lembar jawaban siswa, lalu tentukan status setiap nomor berdasarkan aturan koreksi berikut:
+Tugasmu: Baca SETIAP butir soal BERNOMOR yang terlihat pada foto lembar jawaban siswa dari awal sampai akhir (termasuk di kolom/bagian berbeda), jangan ada nomor soal yang dilewati. Lalu tentukan status setiap nomor berdasarkan aturan koreksi berikut:
 
 ABAIKAN TOTAL (jangan dijadikan butir soal):
 - Nama siswa di atas kertas
@@ -1189,7 +1265,11 @@ Kembalikan HANYA format JSON murni (array of objects) tanpa awalan/akhiran markd
         results: detectedResults
       };
 
-      setSubmissions([newSub, ...submissions]);
+      const nextSubs = [newSub, ...submissions];
+      setSubmissions(nextSubs);
+      try {
+        localStorage.setItem('albita_submissions', JSON.stringify(nextSubs));
+      } catch {}
 
       const scanResultObj = {
         student: targetStudent,
@@ -1293,9 +1373,10 @@ Kembalikan HANYA format JSON murni (array of objects) tanpa awalan/akhiran markd
     let generatedQuestions = [];
 
     if (genAI) {
-      try {
-        const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
-        const prompt = `Sebagai pengajar Bimbel Albita, buatkan paket soal remedial yang setara dan sejenis dengan butir-butir soal yang salah berikut:
+      for (const mName of ['gemini-3.8-flash', 'gemini-2.5-flash']) {
+        try {
+          const model = genAI.getGenerativeModel({ model: mName });
+          const prompt = `Sebagai pengajar Bimbel Albita, buatkan paket soal remedial yang setara dan sejenis dengan butir-butir soal yang salah berikut:
 
 ${sourceQuestions.map(q => `Soal Asli (${q.displayNo}): ${q.text} (Topik: ${q.topic || 'Materi'})`).join('\n\n')}
 
@@ -1315,13 +1396,17 @@ Kembalikan HANYA array JSON murni tanpa markdown codeblock:
   }
 ]`;
 
-        const res = await model.generateContent(prompt);
-        const resText = res.response.text().trim();
-        const clean = resText.replace(/```json/g, '').replace(/```/g, '').trim();
-        generatedQuestions = JSON.parse(clean);
-      } catch (err) {
-        console.warn('Gemini remedial generator fallback:', err);
-        generatedQuestions = [];
+          const res = await model.generateContent(prompt);
+          const resText = res.response.text().trim();
+          const clean = resText.replace(/```json/g, '').replace(/```/g, '').trim();
+          const parsed = JSON.parse(clean);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            generatedQuestions = parsed;
+            break;
+          }
+        } catch (err) {
+          console.warn(`Gemini remedial generator (${mName}) fallback:`, err);
+        }
       }
     }
 
@@ -1376,7 +1461,11 @@ Kembalikan HANYA array JSON murni tanpa markdown codeblock:
       }))
     };
 
-    setExams([newRemedialExam, ...exams]);
+    const nextExams = [newRemedialExam, ...exams];
+    setExams(nextExams);
+    try {
+      localStorage.setItem('albita_exams', JSON.stringify(nextExams));
+    } catch {}
 
     if (supabase) {
       try {
@@ -1551,11 +1640,12 @@ Kembalikan HANYA array JSON murni tanpa markdown codeblock:
     let recapResultText = '';
 
     if (genAI) {
-      try {
-        const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
-        const evalLogs = filteredEvals.map(e => `[${e.dateKey}] (${e.evalType}): ${e.summaryText} (Topik: ${(e.weakTopics || []).join(', ')})`).join('\n');
+      for (const mName of ['gemini-3.8-flash', 'gemini-2.5-flash']) {
+        try {
+          const model = genAI.getGenerativeModel({ model: mName });
+          const evalLogs = filteredEvals.map(e => `[${e.dateKey}] (${e.evalType}): ${e.summaryText} (Topik: ${(e.weakTopics || []).join(', ')})`).join('\n');
 
-        const prompt = `Sebagai konsultan akademik Bimbel Albita, susunlah LAPORAN EVALUASI PERKEMBANGAN BULANAN siswa berikut untuk bulan ${monthName} ${yearNum}:
+          const prompt = `Sebagai konsultan akademik Bimbel Albita, susunlah LAPORAN EVALUASI PERKEMBANGAN BULANAN siswa berikut untuk bulan ${monthName} ${yearNum}:
 
 Nama Siswa: ${targetStudent ? targetStudent.name : 'Seluruh Siswa'}
 Kelas: ${targetStudent ? targetStudent.class : '-'}
@@ -1570,10 +1660,12 @@ Format Laporan yang harus kamu buat:
 
 Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur rapi.`;
 
-        const res = await model.generateContent(prompt);
-        recapResultText = res.response.text().trim();
-      } catch (err) {
-        console.warn('Gemini monthly recap fallback:', err);
+          const res = await model.generateContent(prompt);
+          recapResultText = res.response.text().trim();
+          if (recapResultText) break;
+        } catch (err) {
+          console.warn(`Gemini monthly recap (${mName}) fallback:`, err);
+        }
       }
     }
 
@@ -1955,7 +2047,7 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
                   <Sparkles className="w-5 h-5 text-indigo-600" /> Smart Scan Koreksi Lembar Jawaban (Gemini Vision)
                 </h2>
                 <p className="text-xs text-slate-500 mt-1">
-                  Pilih siswa dan tanggal pengerjaan/les (paket soal acuan bersifat opsional; AI langsung membaca butir soal bernomor dan nomor asli di kertas).
+                  Pilih siswa dan tanggal pengerjaan/les (paket soal acuan bersifat opsional; AI langsung membaca seluruh butir soal bernomor dan nomor asli di kertas).
                 </p>
               </div>
 
@@ -2072,7 +2164,7 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
                 {/* Ringkasan Status Butir Soal */}
                 <div className="space-y-3">
                   <h4 className="font-bold text-xs uppercase tracking-wider text-slate-600 flex items-center gap-1.5">
-                    <FileCheck className="w-4 h-4 text-indigo-600" /> Hasil Verifikasi Status Per Nomor:
+                    <FileCheck className="w-4 h-4 text-indigo-600" /> Hasil Verifikasi Status Per Nomor ({(lastScanResult.submission.results || []).length} butir):
                   </h4>
                   <div className="space-y-2">
                     {(lastScanResult.submission.results || []).map((res, idx) => {
