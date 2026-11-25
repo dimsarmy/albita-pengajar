@@ -123,8 +123,30 @@ const fileToGenerativePart = async (file) => {
   });
 };
 
-// Helper: Mengekstrak SELURUH butir soal bernomor dari teks dokumen (termasuk multi-baris & tab/spasi berlebih)
-const extractNumberedQuestionsFromText = (rawText = '') => {
+// Helper: Mengubah HTML hasil mammoth ke baris teks bersih per blok/sel tabel
+const htmlToCleanLines = (htmlString = '') => {
+  if (!htmlString) return [];
+  const withBreaks = htmlString
+    .replace(/<\/(p|div|h1|h2|h3|h4|li|tr)>/gi, '\n')
+    .replace(/<\/(td|th)>/gi, ' | ')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'");
+
+  return withBreaks
+    .split('\n')
+    .flatMap((line) => line.split(' | '))
+    .map((l) => l.replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+};
+
+// Helper: Mengekstrak SELURUH butir soal bernomor secara berurutan & rapi
+const extractNumberedQuestionsFromText = (rawText = '', htmlFallback = '') => {
   const skippedExact = new Set([
     'soal',
     '*pembetulan',
@@ -136,10 +158,15 @@ const extractNumberedQuestionsFromText = (rawText = '') => {
     'tanggal'
   ]);
 
-  const rawLines = String(rawText || '')
+  const htmlLines = htmlToCleanLines(htmlFallback);
+  const plainLines = String(rawText || '')
     .replace(/\r\n/g, '\n')
     .replace(/\r/g, '\n')
-    .split('\n');
+    .split('\n')
+    .map((l) => l.replace(/\t+/g, ' ').replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+
+  const sourceLines = htmlLines.length > 0 ? htmlLines : plainLines;
 
   let currentSection = '';
   const items = [];
@@ -155,13 +182,10 @@ const extractNumberedQuestionsFromText = (rawText = '') => {
     activeItem = null;
   };
 
-  for (const rawLine of rawLines) {
-    const line = rawLine.replace(/\t+/g, ' ').trim();
-    if (!line) continue;
-
+  for (const line of sourceLines) {
     const lower = line.toLowerCase();
 
-    // Deteksi header bagian seperti "B. Soal Bahasa Inggris", "Bagian 1: ...", "Bab 2"
+    // Deteksi judul bagian seperti "B. Soal Bahasa Inggris", "Bagian 1: ...", "Soal Bahasa Inggris (...)"
     if (
       /^(b\.|bagian|bab|unit|part)\s*\d*/i.test(line) ||
       /^soal\s+bahasa\s+/i.test(line)
@@ -182,7 +206,7 @@ const extractNumberedQuestionsFromText = (rawText = '') => {
       continue;
     }
 
-    // Cocokkan awal butir bernomor: "1. ...", "9   .....", "14) ...", "(1) ..."
+    // Cocokkan awal butir bernomor: "1. ...", "9 .....", "14) ..."
     const match = line.match(/^(?:no\.?\s*|soal\s*)?\(?(\d{1,3})\)?\s*(?:[.):\-]+|\s+)(.+)$/i);
     if (match) {
       flushActive();
@@ -196,7 +220,7 @@ const extractNumberedQuestionsFromText = (rawText = '') => {
         topic: currentSection || 'Materi'
       };
     } else if (activeItem) {
-      // Lanjutan baris dari butir soal yang sama bila terpotong ke baris berikutnya
+      // Lanjutan baris dari butir soal yang sama jika pecah ke baris baru
       activeItem.text += ` ${line}`;
     }
   }
@@ -807,9 +831,12 @@ export default function App() {
     if (isDoc) {
       try {
         const arrayBuffer = await file.arrayBuffer();
-        const result = await mammoth.extractRawText({ arrayBuffer });
-        docContent = result.value || '';
-        parsedQuestions = extractNumberedQuestionsFromText(docContent);
+        const [textRes, htmlRes] = await Promise.all([
+          mammoth.extractRawText({ arrayBuffer }),
+          mammoth.convertToHtml({ arrayBuffer }).catch(() => ({ value: '' }))
+        ]);
+        docContent = textRes.value || '';
+        parsedQuestions = extractNumberedQuestionsFromText(docContent, htmlRes.value || '');
       } catch (err) {
         console.error('Gagal membaca file DOC:', err);
         docContent = '';
@@ -1047,17 +1074,17 @@ export default function App() {
     try {
       let detectedResults = [];
       let aiNote = '';
+      let scanErrorMessage = '';
 
       if (genAI && imageFile) {
-        try {
-          const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
-          const imagePart = await fileToGenerativePart(imageFile);
+        const modelNames = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash'];
+        const imagePart = await fileToGenerativePart(imageFile);
 
-          const referenceBlock = targetExam
-            ? `\nDaftar Butir Soal Acuan Opsional:\n${(targetExam.questions || []).map(q => `Nomor ${q.no}: ${q.text} (Kunci: ${q.answerKey || '-'})`).join('\n')}`
-            : '\nTidak ada paket soal acuan yang dipilih. Baca langsung seluruh butir soal bernomor yang terlihat di foto.';
+        const referenceBlock = targetExam
+          ? `\nDaftar Butir Soal Acuan Opsional:\n${(targetExam.questions || []).map(q => `Nomor ${q.no}: ${q.text} (Kunci: ${q.answerKey || '-'})`).join('\n')}`
+          : '\nTidak ada paket soal acuan yang dipilih. Baca langsung seluruh butir soal bernomor yang terlihat di foto.';
 
-          const prompt = `Kamu adalah AI ahli koreksi lembar jawaban siswa di Bimbel Albita.
+        const prompt = `Kamu adalah AI ahli koreksi lembar jawaban siswa di Bimbel Albita.
 Tugasmu: Baca HANYA butir soal BERNOMOR yang terlihat pada foto lembar jawaban siswa, lalu tentukan status setiap nomor berdasarkan aturan koreksi berikut:
 
 ABAIKAN TOTAL (jangan dijadikan butir soal):
@@ -1088,115 +1115,46 @@ Kembalikan HANYA format JSON murni (array of objects) tanpa awalan/akhiran markd
   }
 ]`;
 
-          const result = await model.generateContent([prompt, imagePart]);
-          const responseText = result.response.text().trim();
-          const cleanJson = responseText.replace(/```json/gi, '').replace(/```/g, '').trim();
-          const parsed = JSON.parse(cleanJson);
-          if (Array.isArray(parsed)) {
-            detectedResults = parsed.map((item, idx) => {
-              const noVal = item.no ?? idx + 1;
-              const secLabel = item.sectionLabel ? String(item.sectionLabel).trim() : '';
-              return {
-                no: noVal,
-                sectionLabel: secLabel,
-                displayNo: item.displayNo || (secLabel ? `${secLabel} - No. ${noVal}` : `No. ${noVal}`),
-                questionText: item.questionText || item.text || `Butir Soal No. ${noVal}`,
-                status: ['wrong', 'corrected', 'incomplete', 'correct'].includes(item.status) ? item.status : 'correct',
-                ruleApplied: item.ruleApplied || '',
-                inkNote: item.inkNote || '',
-                topic: item.topic || secLabel || 'Materi Latihan'
-              };
-            });
+        for (const modelName of modelNames) {
+          try {
+            const model = genAI.getGenerativeModel({ model: modelName });
+            const result = await model.generateContent([prompt, imagePart]);
+            const responseText = result.response.text().trim();
+            const cleanJson = responseText.replace(/```json/gi, '').replace(/```/g, '').trim();
+            const parsed = JSON.parse(cleanJson);
+            if (Array.isArray(parsed) && parsed.length > 0) {
+              detectedResults = parsed.map((item, idx) => {
+                const noVal = item.no ?? idx + 1;
+                const secLabel = item.sectionLabel ? String(item.sectionLabel).trim() : '';
+                return {
+                  no: noVal,
+                  sectionLabel: secLabel,
+                  displayNo: item.displayNo || (secLabel ? `${secLabel} - No. ${noVal}` : `No. ${noVal}`),
+                  questionText: item.questionText || item.text || `Butir Soal No. ${noVal}`,
+                  status: ['wrong', 'corrected', 'incomplete', 'correct'].includes(item.status) ? item.status : 'correct',
+                  ruleApplied: item.ruleApplied || '',
+                  inkNote: item.inkNote || '',
+                  topic: item.topic || secLabel || 'Materi Latihan'
+                };
+              });
+              aiNote = `Dianalisis menggunakan Gemini Vision (${modelName}).`;
+              break;
+            }
+          } catch (visionErr) {
+            console.warn(`Model ${modelName} gagal:`, visionErr);
+            scanErrorMessage = visionErr?.message || 'Gagal menghubungi Gemini Vision';
           }
-          aiNote = 'Dianalisis menggunakan Gemini Vision Model.';
-        } catch (visionErr) {
-          console.warn('Gemini Vision API call failed, menggunakan fallback simulasi aturan:', visionErr);
-          detectedResults = [];
         }
+      } else if (!apiKey) {
+        scanErrorMessage = 'VITE_GEMINI_API_KEY belum terpasang di environment.';
       }
 
       if (!detectedResults || detectedResults.length === 0) {
-        const baseQs = (targetExam?.questions && targetExam.questions.length > 0)
-          ? targetExam.questions
-          : [
-              { no: 1, text: 'Butir Soal No. 1', topic: 'Pemahaman Dasar' },
-              { no: 2, text: 'Butir Soal No. 2', topic: 'Operasi Hitung' },
-              { no: 3, text: 'Butir Soal No. 3', topic: 'Konsep Lanjutan' },
-              { no: 4, text: 'Butir Soal No. 4', topic: 'Penalaran Soal' },
-              { no: 5, text: 'Butir Soal No. 5', topic: 'Analisis Masalah' }
-            ];
-
-        detectedResults = baseQs.map((q, idx) => {
-          const displayLabel = q.sectionLabel ? `${q.sectionLabel} - No. ${q.no}` : `No. ${q.no}`;
-          if (idx === 0) {
-            return {
-              no: q.no,
-              sectionLabel: q.sectionLabel || '',
-              displayNo: displayLabel,
-              questionText: q.text,
-              status: 'correct',
-              ruleApplied: 'Aturan 5: Tanda centang jawaban benar',
-              inkNote: 'Centang jelas, jawaban tepat',
-              topic: q.topic || 'Pemahaman Dasar'
-            };
-          } else if (idx === 1) {
-            return {
-              no: q.no,
-              sectionLabel: q.sectionLabel || '',
-              displayNo: displayLabel,
-              questionText: q.text,
-              status: 'wrong',
-              ruleApplied: 'Aturan 1: Silang merah saja',
-              inkNote: 'Tanda silang (X) tinta merah tanpa coretan biru',
-              topic: q.topic || 'Operasi Hitung'
-            };
-          } else if (idx === 2) {
-            return {
-              no: q.no,
-              sectionLabel: q.sectionLabel || '',
-              displayNo: displayLabel,
-              questionText: q.text,
-              status: 'corrected',
-              ruleApplied: 'Aturan 3: Silang merah bertumpuk biru (tanpa kata salah)',
-              inkNote: 'Ada silang merah yang sudah ditimpa tinta biru oleh anak tanpa tulisan salah',
-              topic: q.topic || 'Konsep Lanjutan'
-            };
-          } else if (idx === 3) {
-            return {
-              no: q.no,
-              sectionLabel: q.sectionLabel || '',
-              displayNo: displayLabel,
-              questionText: q.text,
-              status: 'incomplete',
-              ruleApplied: 'Aturan 4: Lingkaran merah (Benar Kurang Lengkap)',
-              inkNote: 'Dilingkari merah: jawaban akhir benar namun cara pengerjaan belum lengkap',
-              topic: q.topic || 'Penalaran Soal'
-            };
-          } else if (idx === 4) {
-            return {
-              no: q.no,
-              sectionLabel: q.sectionLabel || '',
-              displayNo: displayLabel,
-              questionText: q.text,
-              status: 'wrong',
-              ruleApplied: 'Aturan 2: Silang merah bertumpuk biru + ada tulisan salah',
-              inkNote: 'Silang merah bertumpuk biru namun terdapat kata "salah" di samping nomor',
-              topic: q.topic || 'Analisis Masalah'
-            };
-          } else {
-            return {
-              no: q.no,
-              sectionLabel: q.sectionLabel || '',
-              displayNo: displayLabel,
-              questionText: q.text,
-              status: 'correct',
-              ruleApplied: 'Aturan 5: Jawaban Benar',
-              inkNote: 'Jawaban tepat',
-              topic: q.topic || 'Materi Umum'
-            };
-          }
-        });
-        aiNote = 'Deteksi otomatis berdasarkan aturan koreksi Albita.';
+        setIsScanning(false);
+        alert(
+          `Scan AI belum berhasil membaca butir soal dari foto.\nDetail: ${scanErrorMessage || 'Pastikan foto jelas dan VITE_GEMINI_API_KEY aktif.'}`
+        );
+        return;
       }
 
       const wrongList = detectedResults.filter(r => r.status === 'wrong');
@@ -1321,7 +1279,7 @@ Kembalikan HANYA format JSON murni (array of objects) tanpa awalan/akhiran markd
 
     if (genAI) {
       try {
-        const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+        const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
         const prompt = `Sebagai pengajar Bimbel Albita, buatkan paket soal remedial yang setara dan sejenis dengan butir-butir soal yang salah berikut:
 
 ${sourceQuestions.map(q => `Soal Asli (${q.displayNo}): ${q.text} (Topik: ${q.topic || 'Materi'})`).join('\n\n')}
@@ -1579,7 +1537,7 @@ Kembalikan HANYA array JSON murni tanpa markdown codeblock:
 
     if (genAI) {
       try {
-        const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+        const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
         const evalLogs = filteredEvals.map(e => `[${e.dateKey}] (${e.evalType}): ${e.summaryText} (Topik: ${(e.weakTopics || []).join(', ')})`).join('\n');
 
         const prompt = `Sebagai konsultan akademik Bimbel Albita, susunlah LAPORAN EVALUASI PERKEMBANGAN BULANAN siswa berikut untuk bulan ${monthName} ${yearNum}:
