@@ -128,7 +128,7 @@ const htmlToCleanLines = (htmlString = '') => {
   if (!htmlString) return [];
   const withBreaks = htmlString
     .replace(/<\/(p|div|h1|h2|h3|h4|li|tr)>/gi, '\n')
-    .replace(/<\/(td|th)>/gi, ' | ')
+    .replace(/<\/(td|th)>/gi, '\n')
     .replace(/<br\s*\/?>/gi, '\n')
     .replace(/<[^>]+>/g, ' ')
     .replace(/&nbsp;/gi, ' ')
@@ -140,7 +140,6 @@ const htmlToCleanLines = (htmlString = '') => {
 
   return withBreaks
     .split('\n')
-    .flatMap((line) => line.split(' | '))
     .map((l) => l.replace(/\s+/g, ' ').trim())
     .filter(Boolean);
 };
@@ -169,6 +168,8 @@ const extractNumberedQuestionsFromText = (rawText = '', htmlFallback = '') => {
   const sourceLines = htmlLines.length > 0 ? htmlLines : plainLines;
 
   let currentSection = '';
+  let sectionRepeatCounter = 0;
+  const seenNumbersInSection = new Set();
   const items = [];
   let activeItem = null;
 
@@ -192,6 +193,8 @@ const extractNumberedQuestionsFromText = (rawText = '', htmlFallback = '') => {
     ) {
       flushActive();
       currentSection = line;
+      sectionRepeatCounter = 0;
+      seenNumbersInSection.clear();
       continue;
     }
 
@@ -212,12 +215,24 @@ const extractNumberedQuestionsFromText = (rawText = '', htmlFallback = '') => {
       flushActive();
       const noVal = parseInt(match[1], 10);
       const bodyText = match[2].trim();
+
+      if (seenNumbersInSection.has(noVal)) {
+        sectionRepeatCounter += 1;
+        seenNumbersInSection.clear();
+      }
+      seenNumbersInSection.add(noVal);
+
+      const baseLabel = currentSection || 'Bagian Soal';
+      const effectiveSection = sectionRepeatCounter > 0
+        ? `${baseLabel} (Lanjutan ${sectionRepeatCounter + 1})`
+        : currentSection;
+
       activeItem = {
         no: noVal,
-        sectionLabel: currentSection,
+        sectionLabel: effectiveSection,
         text: bodyText,
         answerKey: '',
-        topic: currentSection || 'Materi'
+        topic: effectiveSection || 'Materi'
       };
     } else if (activeItem) {
       // Lanjutan baris dari butir soal yang sama jika pecah ke baris baru
@@ -1077,7 +1092,7 @@ export default function App() {
       let scanErrorMessage = '';
 
       if (genAI && imageFile) {
-        const modelNames = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash'];
+        const modelNames = ['gemini-2.5-flash'];
         const imagePart = await fileToGenerativePart(imageFile);
 
         const referenceBlock = targetExam
