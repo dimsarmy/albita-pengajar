@@ -123,8 +123,8 @@ const fileToGenerativePart = async (file) => {
   });
 };
 
-// Helper: Menyaring baris hasil ekstraksi dokumen agar hanya butir soal bernomor yang masuk
-const extractNumberedQuestionsFromLines = (lines = []) => {
+// Helper: Mengekstrak SELURUH butir soal bernomor dari teks dokumen (termasuk multi-baris & tab/spasi berlebih)
+const extractNumberedQuestionsFromText = (rawText = '') => {
   const skippedExact = new Set([
     'soal',
     '*pembetulan',
@@ -136,44 +136,72 @@ const extractNumberedQuestionsFromLines = (lines = []) => {
     'tanggal'
   ]);
 
+  const rawLines = String(rawText || '')
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .split('\n');
+
   let currentSection = '';
   const items = [];
+  let activeItem = null;
 
-  lines.forEach((rawLine) => {
-    const line = String(rawLine || '').trim();
-    if (!line) return;
+  const flushActive = () => {
+    if (activeItem && activeItem.text.trim()) {
+      items.push({
+        ...activeItem,
+        text: activeItem.text.replace(/\s+/g, ' ').trim()
+      });
+    }
+    activeItem = null;
+  };
+
+  for (const rawLine of rawLines) {
+    const line = rawLine.replace(/\t+/g, ' ').trim();
+    if (!line) continue;
+
     const lower = line.toLowerCase();
 
-    if (/^(b\.|bagian|bab|unit|part)\s*\d*/i.test(line)) {
+    // Deteksi header bagian seperti "B. Soal Bahasa Inggris", "Bagian 1: ...", "Bab 2"
+    if (
+      /^(b\.|bagian|bab|unit|part)\s*\d*/i.test(line) ||
+      /^soal\s+bahasa\s+/i.test(line)
+    ) {
+      flushActive();
       currentSection = line;
-      return;
+      continue;
     }
 
+    // Lewati baris non-soal (nama siswa, *Pembetulan, judul Soal, instruksi)
     if (
       skippedExact.has(lower) ||
       lower.startsWith('*pembetulan') ||
       lower.startsWith('nama:') ||
       /^(isilah titik-titik|fill in the blanks|kerjakan soal|jawablah pertanyaan|petunjuk|pilihlah jawaban)/i.test(line)
     ) {
-      return;
+      flushActive();
+      continue;
     }
 
-    const match = line.match(/^(?:no\.?\s*|soal\s*)?(\d+)\s*[.):\-]\s*(.+)$/i);
-    if (!match) return;
+    // Cocokkan awal butir bernomor: "1. ...", "9   .....", "14) ...", "(1) ..."
+    const match = line.match(/^(?:no\.?\s*|soal\s*)?\(?(\d{1,3})\)?\s*(?:[.):\-]+|\s+)(.+)$/i);
+    if (match) {
+      flushActive();
+      const noVal = parseInt(match[1], 10);
+      const bodyText = match[2].trim();
+      activeItem = {
+        no: noVal,
+        sectionLabel: currentSection,
+        text: bodyText,
+        answerKey: '',
+        topic: currentSection || 'Materi'
+      };
+    } else if (activeItem) {
+      // Lanjutan baris dari butir soal yang sama bila terpotong ke baris berikutnya
+      activeItem.text += ` ${line}`;
+    }
+  }
 
-    const noVal = parseInt(match[1], 10);
-    const bodyText = match[2].trim();
-    if (!bodyText) return;
-
-    items.push({
-      no: noVal,
-      sectionLabel: currentSection,
-      text: bodyText,
-      answerKey: '',
-      topic: currentSection || 'Materi'
-    });
-  });
-
+  flushActive();
   return items;
 };
 
@@ -781,8 +809,7 @@ export default function App() {
         const arrayBuffer = await file.arrayBuffer();
         const result = await mammoth.extractRawText({ arrayBuffer });
         docContent = result.value || '';
-        const lines = docContent.split('\n').map(l => l.trim()).filter(l => l.length > 0);
-        parsedQuestions = extractNumberedQuestionsFromLines(lines);
+        parsedQuestions = extractNumberedQuestionsFromText(docContent);
       } catch (err) {
         console.error('Gagal membaca file DOC:', err);
         docContent = '';
@@ -1003,7 +1030,6 @@ export default function App() {
     setIsScanning(true);
     setLastScanResult(null);
 
-    // Tanggal kejadian soal/les yang dipilih pengajar
     const targetDateKey = scanDate || todayKey;
     const parts = targetDateKey.split('-');
     const yNum = parts[0];
@@ -1032,7 +1058,7 @@ export default function App() {
             : '\nTidak ada paket soal acuan yang dipilih. Baca langsung seluruh butir soal bernomor yang terlihat di foto.';
 
           const prompt = `Kamu adalah AI ahli koreksi lembar jawaban siswa di Bimbel Albita.
-Tugasmu: Baca HANYA butir soal BERNOMOR yang terlihat pada foto lembar jawaban siswa, lalu tentukan status setiap nomor berdasarkan 4 ATURAN MUTLAK berikut:
+Tugasmu: Baca HANYA butir soal BERNOMOR yang terlihat pada foto lembar jawaban siswa, lalu tentukan status setiap nomor berdasarkan aturan koreksi berikut:
 
 ABAIKAN TOTAL (jangan dijadikan butir soal):
 - Nama siswa di atas kertas
@@ -1043,8 +1069,8 @@ Gunakan NOMOR SOAL ASLI yang tertera di kertas (sertakan sectionLabel & displayN
 
 Aturan 1 (Salah): Terdapat tanda silang (X) menggunakan pulpen merah saja -> status: "wrong"
 Aturan 2 (Salah): Tanda silang merah bertumpuk dengan tinta biru DAN terdapat tulisan/kata 'salah' di sebelah nomor soal -> status: "wrong"
-Aturan 3 (Sudah Dibenarkan): Tanda silang merah bertumpuk dengan tinta biru TANPA ada kata 'salah' di sebelah nomor soal -> status: "corrected" (dianggap sudah dibenarkan anak, BUKAN soal salah yang perlu diulang)
-Aturan 4 (Benar Kurang Lengkap): Terdapat lingkaran merah -> status: "incomplete" (jawaban benar namun kurang lengkap/sederhana, beri catatan saran kelengkapan tapi tidak masuk daftar soal salah)
+Aturan 3 (Sudah Dibenarkan): Tanda silang merah bertumpuk dengan tinta biru TANPA ada kata 'salah' di sebelah nomor soal -> status: "corrected"
+Aturan 4 (Benar Kurang Lengkap): Terdapat lingkaran merah -> status: "incomplete"
 Aturan 5 (Benar): Tanda centang atau jawaban benar tanpa silang merah -> status: "correct"
 ${referenceBlock}
 
@@ -1089,7 +1115,6 @@ Kembalikan HANYA format JSON murni (array of objects) tanpa awalan/akhiran markd
         }
       }
 
-      // Fallback cerdas jika API tidak tersedia/error: buat deteksi realistis sesuai 4 aturan
       if (!detectedResults || detectedResults.length === 0) {
         const baseQs = (targetExam?.questions && targetExam.questions.length > 0)
           ? targetExam.questions
@@ -1110,7 +1135,7 @@ Kembalikan HANYA format JSON murni (array of objects) tanpa awalan/akhiran markd
               displayNo: displayLabel,
               questionText: q.text,
               status: 'correct',
-              ruleApplied: 'Aturan 5: Tanda centang hijau/biru jawaban benar',
+              ruleApplied: 'Aturan 5: Tanda centang jawaban benar',
               inkNote: 'Centang jelas, jawaban tepat',
               topic: q.topic || 'Pemahaman Dasar'
             };
@@ -1171,10 +1196,9 @@ Kembalikan HANYA format JSON murni (array of objects) tanpa awalan/akhiran markd
             };
           }
         });
-        aiNote = 'Deteksi otomatis berdasarkan 4 Aturan Warna Koreksi Albita.';
+        aiNote = 'Deteksi otomatis berdasarkan aturan koreksi Albita.';
       }
 
-      // Hitung skor: hanya 'wrong' yang dihitung salah
       const wrongList = detectedResults.filter(r => r.status === 'wrong');
       const totalQuestions = detectedResults.length;
       const calcScore = totalQuestions > 0 ? Math.round(((totalQuestions - wrongList.length) / totalQuestions) * 100) : 100;
@@ -1223,7 +1247,6 @@ Kembalikan HANYA format JSON murni (array of objects) tanpa awalan/akhiran markd
         }
       }
 
-      // Evaluasi Harian & Evaluasi Pembetulan Otomatis
       const isCorrectionExam = resolvedTitle.toLowerCase().includes('pembetulan');
       const targetMonthKey = `${yNum}-${String(mNum + 1).padStart(2, '0')}`;
 
@@ -1274,7 +1297,7 @@ Kembalikan HANYA format JSON murni (array of objects) tanpa awalan/akhiran markd
   // GENERATOR SOAL REMEDIAL
   const handleGenerateRemedial = async () => {
     if (!lastScanResult || !lastScanResult.wrongQuestionsList || lastScanResult.wrongQuestionsList.length === 0) {
-      alert('Tidak ada butir soal yang salah (Aturan 1 & 2) untuk dibuatkan remedial.');
+      alert('Tidak ada butir soal yang salah untuk dibuatkan remedial.');
       return;
     }
 
@@ -1856,7 +1879,7 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
               <div>
                 <h2 className="font-bold text-lg text-slate-900">Bank Soal Guru (Soal Jadi / Materi)</h2>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  Tentukan tanggal pelaksanaan soal dan unggah dokumen soal (DOCX/DOC). Hanya butir soal bernomor yang diekstrak otomatis.
+                  Tentukan tanggal pelaksanaan soal dan unggah dokumen soal (DOCX/DOC). Seluruh butir soal bernomor akan masuk ke Bank Soal.
                 </p>
               </div>
 
@@ -2949,7 +2972,7 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
                   </div>
                   {(viewingExamModal.questions || []).length > 0 && (
                     <div className="mt-3">
-                      <p className="font-bold text-slate-600 mb-2">Butir Soal Bernomor yang Terekstrak</p>
+                      <p className="font-bold text-slate-600 mb-2">Butir Soal Bernomor yang Terekstrak ({viewingExamModal.questions.length} butir)</p>
                       <div className="space-y-2">
                         {(viewingExamModal.questions || []).map((q, idx) => (
                           <div key={idx} className="p-3 rounded-xl bg-indigo-50 border border-indigo-100 space-y-1">
