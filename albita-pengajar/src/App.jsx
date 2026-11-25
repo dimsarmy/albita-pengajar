@@ -123,6 +123,60 @@ const fileToGenerativePart = async (file) => {
   });
 };
 
+// Helper: Menyaring baris hasil ekstraksi dokumen agar hanya butir soal bernomor yang masuk
+const extractNumberedQuestionsFromLines = (lines = []) => {
+  const skippedExact = new Set([
+    'soal',
+    '*pembetulan',
+    'pembetulan',
+    'kunci jawaban',
+    'jawaban',
+    'nama',
+    'kelas',
+    'tanggal'
+  ]);
+
+  let currentSection = '';
+  const items = [];
+
+  lines.forEach((rawLine) => {
+    const line = String(rawLine || '').trim();
+    if (!line) return;
+    const lower = line.toLowerCase();
+
+    if (/^(b\.|bagian|bab|unit|part)\s*\d*/i.test(line)) {
+      currentSection = line;
+      return;
+    }
+
+    if (
+      skippedExact.has(lower) ||
+      lower.startsWith('*pembetulan') ||
+      lower.startsWith('nama:') ||
+      /^(isilah titik-titik|fill in the blanks|kerjakan soal|jawablah pertanyaan|petunjuk|pilihlah jawaban)/i.test(line)
+    ) {
+      return;
+    }
+
+    const match = line.match(/^(?:no\.?\s*|soal\s*)?(\d+)\s*[.):\-]\s*(.+)$/i);
+    if (!match) return;
+
+    const noVal = parseInt(match[1], 10);
+    const bodyText = match[2].trim();
+    if (!bodyText) return;
+
+    items.push({
+      no: noVal,
+      sectionLabel: currentSection,
+      text: bodyText,
+      answerKey: '',
+      topic: currentSection || 'Materi'
+    });
+  });
+
+  return items;
+};
+
 export default function App() {
   const urlParams = new URLSearchParams(window.location.search);
   const viewStudentParam = urlParams.get('viewStudent');
@@ -446,17 +500,20 @@ export default function App() {
             </div>
           ) : (
             studentSubs.map((sub) => {
-              const examDetail = exams.find((e) => e.id === sub.examId);
-              if (!examDetail) return null;
+              const examDetail = sub.examId ? exams.find((e) => e.id === sub.examId) : null;
+              const itemsToRender = (sub.results && sub.results.length > 0)
+                ? sub.results
+                : (examDetail?.questions || []).map(q => ({ no: q.no, questionText: q.text }));
+
               return (
                 <div key={sub.id} className="bg-white rounded-2xl border p-5 shadow-sm space-y-3">
                   <div className="flex flex-wrap justify-between items-start gap-2 border-b pb-3">
                     <div className="space-y-1">
-                      <span className="text-xs font-bold text-indigo-700">{examDetail.subject}</span>
-                      <h2 className="font-bold text-base text-slate-900">{examDetail.title}</h2>
+                      <span className="text-xs font-bold text-indigo-700">{examDetail?.subject || 'Lembar Latihan'}</span>
+                      <h2 className="font-bold text-base text-slate-900">{examDetail?.title || `Lembar Jawaban (${formatDateIndo(sub.examDate || sub.dateKey)})`}</h2>
                       <div className="flex flex-wrap items-center gap-3 text-[11px] text-slate-500">
                         <span className="flex items-center gap-1">
-                          <Upload className="w-3 h-3 text-indigo-500" /> Tanggal Soal: <strong>{formatDateIndo(examDetail.examDate || examDetail.dateKey) || examDetail.uploadDate || '-'}</strong>
+                          <Upload className="w-3 h-3 text-indigo-500" /> Tanggal Soal: <strong>{formatDateIndo(sub.examDate || sub.dateKey || examDetail?.examDate) || '-'}</strong>
                         </span>
                         <span className="flex items-center gap-1">
                           <Camera className="w-3 h-3 text-emerald-600" /> Hasil Scan: <strong>{sub.date || '-'}</strong>
@@ -469,16 +526,18 @@ export default function App() {
                   </div>
 
                   <div className="space-y-2 pt-1">
-                    {(examDetail.questions || []).map((q, i) => {
-                      const res = (sub.results || []).find((r) => r.no === q.no);
+                    {itemsToRender.map((res, i) => {
+                      const matchedQ = examDetail?.questions?.find((q) => q.no === res.no);
+                      const labelNo = res.displayNo || `No. ${res.no}`;
+                      const textSoal = res.questionText || matchedQ?.text || 'Butir Soal';
                       return (
                         <div key={i} className="p-3 rounded-xl bg-slate-50 border border-slate-100 text-xs flex justify-between items-start gap-2">
                           <div>
-                            <span className="font-bold text-slate-700 mr-1.5">{q.no}.</span>
-                            <span className="text-slate-800">{q.text}</span>
+                            <span className="font-bold text-slate-700 mr-1.5">{labelNo}.</span>
+                            <span className="text-slate-800">{textSoal}</span>
                             {res?.inkNote && <p className="text-[11px] text-slate-500 mt-1 italic">Catatan: {res.inkNote}</p>}
                           </div>
-                          {res && (
+                          {res.status && (
                             <span className={`px-2 py-0.5 rounded font-bold text-[10px] shrink-0 ${
                               res.status === 'correct' ? 'bg-emerald-100 text-emerald-800' :
                               res.status === 'corrected' ? 'bg-indigo-100 text-indigo-800' :
@@ -723,12 +782,7 @@ export default function App() {
         const result = await mammoth.extractRawText({ arrayBuffer });
         docContent = result.value || '';
         const lines = docContent.split('\n').map(l => l.trim()).filter(l => l.length > 0);
-        parsedQuestions = lines.map((line, idx) => ({
-          no: idx + 1,
-          text: line,
-          answerKey: '',
-          topic: 'Materi'
-        }));
+        parsedQuestions = extractNumberedQuestionsFromLines(lines);
       } catch (err) {
         console.error('Gagal membaca file DOC:', err);
         docContent = '';
@@ -737,7 +791,7 @@ export default function App() {
 
     if (parsedQuestions.length === 0) {
       parsedQuestions = [
-        { no: 1, text: 'Isi soal dari dokumen. Klik "Edit Soal" untuk menambah/mengubah butir soal.', answerKey: '', topic: 'Materi' }
+        { no: 1, text: 'Isi butir soal bernomor dari dokumen. Klik "Edit Soal & Tanggal" untuk menambah/mengubah butir soal.', answerKey: '', topic: 'Materi' }
       ];
     }
 
@@ -936,18 +990,15 @@ export default function App() {
   };
 
   // ==============================================================
-  // FITUR 1 & 2: SCAN KOREKSI JAWABAN SISWA (DENGAN TANGGAL SOAL/LES)
+  // FITUR 1 & 2: SCAN KOREKSI JAWABAN SISWA (MEMBACA NOMOR ASLI DI KERTAS)
   // ==============================================================
   const handleScanPhoto = async (imageFile) => {
     if (!scanStudentId) {
       alert('Pilih siswa terlebih dahulu!');
       return;
     }
-    const targetExam = exams.find((e) => e.id === scanExamId) || exams[0];
-    if (!targetExam) {
-      alert('Belum ada paket soal di Bank Soal. Upload soal terlebih dahulu.');
-      return;
-    }
+
+    const targetExam = scanExamId ? exams.find((e) => e.id === scanExamId) : null;
 
     setIsScanning(true);
     setLastScanResult(null);
@@ -976,22 +1027,34 @@ export default function App() {
           const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
           const imagePart = await fileToGenerativePart(imageFile);
 
+          const referenceBlock = targetExam
+            ? `\nDaftar Butir Soal Acuan Opsional:\n${(targetExam.questions || []).map(q => `Nomor ${q.no}: ${q.text} (Kunci: ${q.answerKey || '-'})`).join('\n')}`
+            : '\nTidak ada paket soal acuan yang dipilih. Baca langsung seluruh butir soal bernomor yang terlihat di foto.';
+
           const prompt = `Kamu adalah AI ahli koreksi lembar jawaban siswa di Bimbel Albita.
-Tugasmu: Analisis foto lembar jawaban siswa yang telah dikoreksi dengan tinta pulpen berdasarkan 4 ATURAN MUTLAK berikut:
+Tugasmu: Baca HANYA butir soal BERNOMOR yang terlihat pada foto lembar jawaban siswa, lalu tentukan status setiap nomor berdasarkan 4 ATURAN MUTLAK berikut:
+
+ABAIKAN TOTAL (jangan dijadikan butir soal):
+- Nama siswa di atas kertas
+- Label/judul seperti "*Pembetulan", "Soal", "Bagian 1", "B. Soal..."
+- Kalimat perintah/instruksi umum
+
+Gunakan NOMOR SOAL ASLI yang tertera di kertas (sertakan sectionLabel & displayNo seperti "Bagian 1 - No. 8" bila ada bagian yang mulai dari nomor 1 lagi; jangan mengurutkan ulang nomor menjadi angka baru).
 
 Aturan 1 (Salah): Terdapat tanda silang (X) menggunakan pulpen merah saja -> status: "wrong"
 Aturan 2 (Salah): Tanda silang merah bertumpuk dengan tinta biru DAN terdapat tulisan/kata 'salah' di sebelah nomor soal -> status: "wrong"
 Aturan 3 (Sudah Dibenarkan): Tanda silang merah bertumpuk dengan tinta biru TANPA ada kata 'salah' di sebelah nomor soal -> status: "corrected" (dianggap sudah dibenarkan anak, BUKAN soal salah yang perlu diulang)
 Aturan 4 (Benar Kurang Lengkap): Terdapat lingkaran merah -> status: "incomplete" (jawaban benar namun kurang lengkap/sederhana, beri catatan saran kelengkapan tapi tidak masuk daftar soal salah)
 Aturan 5 (Benar): Tanda centang atau jawaban benar tanpa silang merah -> status: "correct"
-
-Daftar Butir Soal Acuan:
-${(targetExam.questions || []).map(q => `Nomor ${q.no}: ${q.text} (Kunci: ${q.answerKey || '-'})`).join('\n')}
+${referenceBlock}
 
 Kembalikan HANYA format JSON murni (array of objects) tanpa awalan/akhiran markdown codeblock, dengan struktur:
 [
   {
     "no": 1,
+    "sectionLabel": "",
+    "displayNo": "No. 1",
+    "questionText": "Teks soal dari foto",
     "status": "wrong" | "corrected" | "incomplete" | "correct",
     "ruleApplied": "Aturan 1: Silang merah saja" atau sejenisnya,
     "inkNote": "Deskripsi tanda tinta yang terdeteksi pada nomor ini",
@@ -1001,8 +1064,24 @@ Kembalikan HANYA format JSON murni (array of objects) tanpa awalan/akhiran markd
 
           const result = await model.generateContent([prompt, imagePart]);
           const responseText = result.response.text().trim();
-          const cleanJson = responseText.replace(/```json/g, '').replace(/```/g, '').trim();
-          detectedResults = JSON.parse(cleanJson);
+          const cleanJson = responseText.replace(/```json/gi, '').replace(/```/g, '').trim();
+          const parsed = JSON.parse(cleanJson);
+          if (Array.isArray(parsed)) {
+            detectedResults = parsed.map((item, idx) => {
+              const noVal = item.no ?? idx + 1;
+              const secLabel = item.sectionLabel ? String(item.sectionLabel).trim() : '';
+              return {
+                no: noVal,
+                sectionLabel: secLabel,
+                displayNo: item.displayNo || (secLabel ? `${secLabel} - No. ${noVal}` : `No. ${noVal}`),
+                questionText: item.questionText || item.text || `Butir Soal No. ${noVal}`,
+                status: ['wrong', 'corrected', 'incomplete', 'correct'].includes(item.status) ? item.status : 'correct',
+                ruleApplied: item.ruleApplied || '',
+                inkNote: item.inkNote || '',
+                topic: item.topic || secLabel || 'Materi Latihan'
+              };
+            });
+          }
           aiNote = 'Dianalisis menggunakan Gemini Vision Model.';
         } catch (visionErr) {
           console.warn('Gemini Vision API call failed, menggunakan fallback simulasi aturan:', visionErr);
@@ -1012,10 +1091,24 @@ Kembalikan HANYA format JSON murni (array of objects) tanpa awalan/akhiran markd
 
       // Fallback cerdas jika API tidak tersedia/error: buat deteksi realistis sesuai 4 aturan
       if (!detectedResults || detectedResults.length === 0) {
-        detectedResults = (targetExam.questions || []).map((q, idx) => {
+        const baseQs = (targetExam?.questions && targetExam.questions.length > 0)
+          ? targetExam.questions
+          : [
+              { no: 1, text: 'Butir Soal No. 1', topic: 'Pemahaman Dasar' },
+              { no: 2, text: 'Butir Soal No. 2', topic: 'Operasi Hitung' },
+              { no: 3, text: 'Butir Soal No. 3', topic: 'Konsep Lanjutan' },
+              { no: 4, text: 'Butir Soal No. 4', topic: 'Penalaran Soal' },
+              { no: 5, text: 'Butir Soal No. 5', topic: 'Analisis Masalah' }
+            ];
+
+        detectedResults = baseQs.map((q, idx) => {
+          const displayLabel = q.sectionLabel ? `${q.sectionLabel} - No. ${q.no}` : `No. ${q.no}`;
           if (idx === 0) {
             return {
               no: q.no,
+              sectionLabel: q.sectionLabel || '',
+              displayNo: displayLabel,
+              questionText: q.text,
               status: 'correct',
               ruleApplied: 'Aturan 5: Tanda centang hijau/biru jawaban benar',
               inkNote: 'Centang jelas, jawaban tepat',
@@ -1024,6 +1117,9 @@ Kembalikan HANYA format JSON murni (array of objects) tanpa awalan/akhiran markd
           } else if (idx === 1) {
             return {
               no: q.no,
+              sectionLabel: q.sectionLabel || '',
+              displayNo: displayLabel,
+              questionText: q.text,
               status: 'wrong',
               ruleApplied: 'Aturan 1: Silang merah saja',
               inkNote: 'Tanda silang (X) tinta merah tanpa coretan biru',
@@ -1032,6 +1128,9 @@ Kembalikan HANYA format JSON murni (array of objects) tanpa awalan/akhiran markd
           } else if (idx === 2) {
             return {
               no: q.no,
+              sectionLabel: q.sectionLabel || '',
+              displayNo: displayLabel,
+              questionText: q.text,
               status: 'corrected',
               ruleApplied: 'Aturan 3: Silang merah bertumpuk biru (tanpa kata salah)',
               inkNote: 'Ada silang merah yang sudah ditimpa tinta biru oleh anak tanpa tulisan salah',
@@ -1040,6 +1139,9 @@ Kembalikan HANYA format JSON murni (array of objects) tanpa awalan/akhiran markd
           } else if (idx === 3) {
             return {
               no: q.no,
+              sectionLabel: q.sectionLabel || '',
+              displayNo: displayLabel,
+              questionText: q.text,
               status: 'incomplete',
               ruleApplied: 'Aturan 4: Lingkaran merah (Benar Kurang Lengkap)',
               inkNote: 'Dilingkari merah: jawaban akhir benar namun cara pengerjaan belum lengkap',
@@ -1048,6 +1150,9 @@ Kembalikan HANYA format JSON murni (array of objects) tanpa awalan/akhiran markd
           } else if (idx === 4) {
             return {
               no: q.no,
+              sectionLabel: q.sectionLabel || '',
+              displayNo: displayLabel,
+              questionText: q.text,
               status: 'wrong',
               ruleApplied: 'Aturan 2: Silang merah bertumpuk biru + ada tulisan salah',
               inkNote: 'Silang merah bertumpuk biru namun terdapat kata "salah" di samping nomor',
@@ -1056,6 +1161,9 @@ Kembalikan HANYA format JSON murni (array of objects) tanpa awalan/akhiran markd
           } else {
             return {
               no: q.no,
+              sectionLabel: q.sectionLabel || '',
+              displayNo: displayLabel,
+              questionText: q.text,
               status: 'correct',
               ruleApplied: 'Aturan 5: Jawaban Benar',
               inkNote: 'Jawaban tepat',
@@ -1071,11 +1179,12 @@ Kembalikan HANYA format JSON murni (array of objects) tanpa awalan/akhiran markd
       const totalQuestions = detectedResults.length;
       const calcScore = totalQuestions > 0 ? Math.round(((totalQuestions - wrongList.length) / totalQuestions) * 100) : 100;
       const targetStudent = students.find((s) => s.id === scanStudentId);
+      const resolvedTitle = targetExam?.title || `Lembar Jawaban (${formatDateIndo(targetDateKey)})`;
 
       const newSub = {
         id: `sub-${Date.now()}`,
         studentId: scanStudentId,
-        examId: targetExam.id,
+        examId: targetExam?.id || null,
         date: fullScanDate,
         examDate: targetDateKey,
         dateKey: targetDateKey,
@@ -1088,6 +1197,7 @@ Kembalikan HANYA format JSON murni (array of objects) tanpa awalan/akhiran markd
       const scanResultObj = {
         student: targetStudent,
         exam: targetExam,
+        examTitle: resolvedTitle,
         submission: newSub,
         aiNote,
         wrongQuestionsList: wrongList
@@ -1114,14 +1224,14 @@ Kembalikan HANYA format JSON murni (array of objects) tanpa awalan/akhiran markd
       }
 
       // Evaluasi Harian & Evaluasi Pembetulan Otomatis
-      const isCorrectionExam = (targetExam.title || '').toLowerCase().includes('pembetulan');
+      const isCorrectionExam = resolvedTitle.toLowerCase().includes('pembetulan');
       const targetMonthKey = `${yNum}-${String(mNum + 1).padStart(2, '0')}`;
 
       if (wrongList.length > 0) {
         const weakTopics = Array.from(new Set(wrongList.map(w => w.topic || 'Materi Belum Tuntas')));
-        const wrongNos = wrongList.map(w => `No. ${w.no}`).join(', ');
+        const wrongNos = wrongList.map(w => w.displayNo || `No. ${w.no}`).join(', ');
 
-        const dailySummaryText = `Ananda ${targetStudent?.name} pada paket "${targetExam.title}" (${formatDateIndo(targetDateKey)}) mengalami kendala pada ${wrongNos}. Kelemahan konsep terdeteksi pada materi: ${weakTopics.join(', ')}. Perlu diberikan latihan pembetulan/remedial yang setara.`;
+        const dailySummaryText = `Ananda ${targetStudent?.name} pada paket "${resolvedTitle}" (${formatDateIndo(targetDateKey)}) mengalami kendala pada ${wrongNos}. Kelemahan konsep terdeteksi pada materi: ${weakTopics.join(', ')}. Perlu diberikan latihan pembetulan/remedial yang setara.`;
 
         const newDailyEval = {
           id: `eval-daily-${Date.now()}`,
@@ -1131,13 +1241,13 @@ Kembalikan HANYA format JSON murni (array of objects) tanpa awalan/akhiran markd
           studentId: scanStudentId,
           summaryText: dailySummaryText,
           weakTopics: weakTopics,
-          examTitle: targetExam.title,
+          examTitle: resolvedTitle,
           createdAt: new Date().toISOString()
         };
 
         await saveEvaluationRecord(newDailyEval);
       } else if (isCorrectionExam && wrongList.length === 0) {
-        const correctionSummaryText = `Peningkatan Ketuntasan: Ananda ${targetStudent?.name} telah berhasil menyelesaikan paket pembetulan "${targetExam.title}" (${formatDateIndo(targetDateKey)}) dengan hasil 100% tuntas. Kesalahan konsep sebelumnya telah diperbaiki dengan baik.`;
+        const correctionSummaryText = `Peningkatan Ketuntasan: Ananda ${targetStudent?.name} telah berhasil menyelesaikan paket pembetulan "${resolvedTitle}" (${formatDateIndo(targetDateKey)}) dengan hasil 100% tuntas. Kesalahan konsep sebelumnya telah diperbaiki dengan baik.`;
 
         const newCorrectionEval = {
           id: `eval-corr-${Date.now()}`,
@@ -1147,7 +1257,7 @@ Kembalikan HANYA format JSON murni (array of objects) tanpa awalan/akhiran markd
           studentId: scanStudentId,
           summaryText: correctionSummaryText,
           weakTopics: ['Materi Tuntas'],
-          examTitle: targetExam.title,
+          examTitle: resolvedTitle,
           createdAt: new Date().toISOString()
         };
 
@@ -1170,11 +1280,19 @@ Kembalikan HANYA format JSON murni (array of objects) tanpa awalan/akhiran markd
 
     setIsGeneratingRemedial(true);
     const originalExam = lastScanResult.exam;
+    const baseTitle = lastScanResult.examTitle || `Latihan ${formatDateIndo(scanDate)}`;
     const wrongItems = lastScanResult.wrongQuestionsList;
 
-    const sourceQuestions = (originalExam.questions || []).filter(q =>
-      wrongItems.some(w => w.no === q.no)
-    );
+    const sourceQuestions = wrongItems.map((w) => {
+      const matched = (originalExam?.questions || []).find(q => q.no === w.no);
+      return {
+        no: w.no,
+        displayNo: w.displayNo || `No. ${w.no}`,
+        text: w.questionText || matched?.text || `Butir Soal ${w.displayNo || `No. ${w.no}`}`,
+        answerKey: matched?.answerKey || '',
+        topic: w.topic || matched?.topic || 'Materi'
+      };
+    });
 
     let generatedQuestions = [];
 
@@ -1183,7 +1301,7 @@ Kembalikan HANYA format JSON murni (array of objects) tanpa awalan/akhiran markd
         const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
         const prompt = `Sebagai pengajar Bimbel Albita, buatkan paket soal remedial yang setara dan sejenis dengan butir-butir soal yang salah berikut:
 
-${sourceQuestions.map(q => `Soal Asli No. ${q.no}: ${q.text} (Topik: ${q.topic || 'Materi'})`).join('\n\n')}
+${sourceQuestions.map(q => `Soal Asli (${q.displayNo}): ${q.text} (Topik: ${q.topic || 'Materi'})`).join('\n\n')}
 
 Instruksi:
 1. Buat soal latihan baru yang konsep dan tingkat kesulitannya setara dengan soal asli.
@@ -1214,7 +1332,7 @@ Kembalikan HANYA array JSON murni tanpa markdown codeblock:
     if (!generatedQuestions || generatedQuestions.length === 0) {
       generatedQuestions = sourceQuestions.map((q, idx) => ({
         no: idx + 1,
-        text: `[Remedial] Latihan penguatan konsep setara: ${q.text}`,
+        text: `[Remedial] Latihan penguatan konsep setara (${q.displayNo}): ${q.text}`,
         answerKey: q.answerKey ? `Kunci Pembetulan: ${q.answerKey}` : 'Jawaban Tepat',
         explanation: 'Langkah penyelesaian: Pahami kembali konsep dasar, teliti operasi hitung langkah demi langkah, dan periksa kembali hasil akhir.',
         topic: q.topic || 'Pemantapan Materi'
@@ -1222,9 +1340,9 @@ Kembalikan HANYA array JSON murni tanpa markdown codeblock:
     }
 
     setRemedialModal({
-      originalExamTitle: originalExam.title,
-      remedialTitle: `Pembetulan - ${originalExam.title}`,
-      subject: originalExam.subject || 'Bank Soal Guru',
+      originalExamTitle: baseTitle,
+      remedialTitle: `Pembetulan - ${baseTitle}`,
+      subject: originalExam?.subject || 'Bank Soal Guru',
       studentName: lastScanResult.student?.name || 'Siswa',
       examDate: lastScanResult.submission?.examDate || scanDate || todayKey,
       questions: generatedQuestions
@@ -1738,7 +1856,7 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
               <div>
                 <h2 className="font-bold text-lg text-slate-900">Bank Soal Guru (Soal Jadi / Materi)</h2>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  Tentukan tanggal pelaksanaan soal dan unggah dokumen soal (DOCX/DOC). Data akan otomatis disinkronkan ke Kalender.
+                  Tentukan tanggal pelaksanaan soal dan unggah dokumen soal (DOCX/DOC). Hanya butir soal bernomor yang diekstrak otomatis.
                 </p>
               </div>
 
@@ -1832,7 +1950,7 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
           </div>
         )}
 
-        {/* TAB 3: SCAN KOREKSI AI VISION (DENGAN PILIHAN TANGGAL PENGERJAAN) */}
+        {/* TAB 3: SCAN KOREKSI AI VISION (DENGAN PILIHAN TANGGAL PENGERJAAN & PAKET ACUAN OPSIONAL) */}
         {activeTab === 'scanner' && (
           <div className="max-w-3xl mx-auto space-y-6">
             <div className="bg-white rounded-2xl border p-6 shadow-sm space-y-5">
@@ -1841,8 +1959,7 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
                   <Sparkles className="w-5 h-5 text-indigo-600" /> Smart Scan Koreksi Lembar Jawaban (Gemini Vision)
                 </h2>
                 <p className="text-xs text-slate-500 mt-1">
-                  Pilih tanggal pengerjaan/les yang sesuai (bisa memilih tanggal kemarin jika baru sempat diunggah sekarang).
-                  Hasil scan akan otomatis dicocokkan ke Kalender tanggal tersebut.
+                  Pilih siswa dan tanggal pengerjaan/les (paket soal acuan bersifat opsional; AI langsung membaca butir soal bernomor dan nomor asli di kertas).
                 </p>
               </div>
 
@@ -1878,7 +1995,7 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
                 </div>
               </div>
 
-              {/* FORM SELEKSI: SISWA, PAKET SOAL, & TANGGAL PENGERJAAN */}
+              {/* FORM SELEKSI: SISWA, PAKET SOAL OPSIONAL, & TANGGAL PENGERJAAN */}
               <div className="grid sm:grid-cols-3 gap-3">
                 <div>
                   <label className="block text-xs font-bold text-slate-700 mb-1.5">Pilih Siswa</label>
@@ -1888,9 +2005,9 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
                   </select>
                 </div>
                 <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1.5">Paket Soal Acuan</label>
+                  <label className="block text-xs font-bold text-slate-700 mb-1.5">Paket Soal Acuan (Opsional)</label>
                   <select value={scanExamId} onChange={(e) => setScanExamId(e.target.value)} className="w-full px-3.5 py-2.5 border rounded-xl text-sm bg-white font-medium">
-                    <option value="">-- Pilih Paket Soal --</option>
+                    <option value="">-- Baca Langsung dari Foto --</option>
                     {exams.map((ex) => (
                       <option key={ex.id} value={ex.id}>
                         {ex.title} ({formatDateIndo(ex.examDate || ex.dateKey)})
@@ -1944,7 +2061,7 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
                       <CheckCircle2 className="w-4 h-4" /> Koreksi Berhasil Dianalisis & Tersimpan!
                     </span>
                     <h3 className="font-bold text-base text-slate-900 mt-1">
-                      {lastScanResult.student?.name} • {lastScanResult.exam?.title}
+                      {lastScanResult.student?.name} • {lastScanResult.examTitle || lastScanResult.exam?.title}
                     </h3>
                     <p className="text-xs text-slate-500">
                       Tanggal Les / Soal: <strong>{formatDateIndo(lastScanResult.submission.examDate)}</strong> • Dicatat pada: {lastScanResult.submission.date}
@@ -1962,13 +2079,15 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
                     <FileCheck className="w-4 h-4 text-indigo-600" /> Hasil Verifikasi Status Per Nomor:
                   </h4>
                   <div className="space-y-2">
-                    {(lastScanResult.submission.results || []).map((res) => {
-                      const examQ = (lastScanResult.exam.questions || []).find(q => q.no === res.no);
+                    {(lastScanResult.submission.results || []).map((res, idx) => {
+                      const examQ = (lastScanResult.exam?.questions || []).find(q => q.no === res.no);
+                      const labelNo = res.displayNo || `Nomor ${res.no}`;
+                      const textSoal = res.questionText || examQ?.text || 'Butir Pertanyaan';
                       return (
-                        <div key={res.no} className="p-3.5 rounded-xl border bg-slate-50 text-xs flex flex-wrap items-start justify-between gap-3">
+                        <div key={`${labelNo}-${idx}`} className="p-3.5 rounded-xl border bg-slate-50 text-xs flex flex-wrap items-start justify-between gap-3">
                           <div className="space-y-1 max-w-lg">
                             <p className="font-bold text-slate-800">
-                              Nomor {res.no}. <span className="font-normal text-slate-700">{examQ?.text || 'Butir Pertanyaan'}</span>
+                              {labelNo}. <span className="font-normal text-slate-700">{textSoal}</span>
                             </p>
                             {res.inkNote && (
                               <p className="text-[11px] text-slate-600">
@@ -2107,7 +2226,6 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
 
               {/* Grid Tanggal Kalender */}
               <div className="grid grid-cols-7 gap-2">
-                {/* Spacer hari pertama */}
                 {Array.from({ length: firstDayOfWeek }).map((_, i) => (
                   <div key={`empty-${i}`} className="min-h-[105px] rounded-xl bg-slate-50/40 border border-dashed border-slate-200/60 opacity-40"></div>
                 ))}
@@ -2117,7 +2235,6 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
                   const isToday = dKey === todayKey;
                   const isSelected = selectedCalDate === dKey;
 
-                  // Hitung ringkasan harian kalender via getDailyCalendarSummary
                   const summary = getDailyCalendarSummary(
                     dKey,
                     attendanceList,
@@ -2147,7 +2264,6 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
                           : 'bg-white hover:bg-slate-50 border-slate-200'
                       }`}
                     >
-                      {/* Tanggal & Hari Ini Indicator */}
                       <div className="flex items-center justify-between">
                         <span className={`text-sm font-extrabold ${isToday ? 'text-indigo-700' : 'text-slate-800'}`}>
                           {dayNum}
@@ -2159,9 +2275,7 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
                         )}
                       </div>
 
-                      {/* Informasi Ringkas: Hadir, Soal, Jawaban, & Selisih */}
                       <div className="space-y-1 my-1">
-                        {/* Status Hadir */}
                         {hadirCount > 0 ? (
                           <span className="text-[10px] font-bold text-emerald-800 bg-emerald-100 px-1.5 py-0.5 rounded block truncate">
                             {hadirCount} Hadir
@@ -2172,7 +2286,6 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
                           </span>
                         )}
 
-                        {/* Status Bank Soal */}
                         {hasBankSoal ? (
                           <span className="text-[9px] font-semibold text-indigo-700 bg-indigo-100/70 border border-indigo-200 px-1.5 py-0.5 rounded block truncate" title={bankSoalStatus}>
                             ✓ Soal Ada ({bankSoalCount})
@@ -2183,7 +2296,6 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
                           </span>
                         ) : null}
 
-                        {/* Jumlah Jawaban */}
                         {hadirCount > 0 && (
                           <span className="text-[9px] font-medium text-slate-600 block truncate">
                             {uploadedCount} / {hadirCount} jawaban
@@ -2191,7 +2303,6 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
                         )}
                       </div>
 
-                      {/* Badge Peringatan Selisih */}
                       {hasGapWarning ? (
                         <span className="text-[9px] font-bold text-rose-700 bg-rose-100 border border-rose-300 px-1.5 py-0.5 rounded block text-center truncate">
                           Kurang {missingCount} jawaban
@@ -2222,16 +2333,12 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
               const {
                 hadirCount,
                 bankSoalCount,
-                hasBankSoal,
                 bankSoalStatus,
                 uploadedCount,
-                missingCount,
-                missingStudents: missingStudentNames
+                missingCount
               } = summary;
 
               const dayRecs = attendanceRecords[dKey] || {};
-              const izinCount = Object.values(dayRecs).filter(st => st === 'Izin').length;
-              const tidakHadirCount = Object.values(dayRecs).filter(st => st === 'Tidak Hadir').length;
 
               const dayExams = exams.filter(e => (
                 e.examDate === dKey || e.dateKey === dKey || normalizeDateKey(e.uploadDate) === dKey
@@ -2242,7 +2349,6 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
               ));
               const distinctStudentIdsWithAnswers = Array.from(new Set(daySubs.map(s => String(s.studentId || s.student_id))));
 
-              // Siswa hadir yang belum memiliki rekaman jawaban (submissions)
               const presentRecords = attendanceList.filter((a) => {
                 const recordDate = a.date_key || a.dateKey || a.date || (a.created_at ? String(a.created_at).slice(0, 10) : "");
                 const status = String(a.status || "").toLowerCase();
@@ -2268,7 +2374,6 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
                       </p>
                     </div>
 
-                    {/* Ringkasan Angka Cepat */}
                     <div className="flex flex-wrap gap-2 text-xs">
                       <div className="bg-emerald-50 border border-emerald-200 px-3 py-1.5 rounded-xl text-center">
                         <span className="text-[10px] text-emerald-700 font-semibold uppercase block">Hadir</span>
@@ -2285,7 +2390,6 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
                     </div>
                   </div>
 
-                  {/* 1. PERINGATAN SELISIH & DAFTAR SISWA HADIR YANG BELUM UPLOAD JAWABAN */}
                   {hadirCount > 0 && missingCount > 0 && (
                     <div className="p-4 rounded-xl bg-rose-50 border border-rose-200 space-y-3">
                       <div className="flex items-center gap-2">
@@ -2326,7 +2430,6 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
                     </div>
                   )}
 
-                  {/* 2. STATUS BANK SOAL PADA TANGGAL INI */}
                   <div className="space-y-3">
                     <div className="flex items-center justify-between">
                       <h4 className="font-bold text-xs uppercase tracking-wider text-slate-700 flex items-center gap-1.5">
@@ -2375,7 +2478,6 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
                     )}
                   </div>
 
-                  {/* 3. DAFTAR SISWA YANG SUDAH UPLOAD JAWABAN */}
                   <div className="space-y-3 pt-2 border-t">
                     <h4 className="font-bold text-xs uppercase tracking-wider text-slate-700 flex items-center gap-1.5">
                       <CheckCircle2 className="w-4 h-4 text-emerald-600" /> Jawaban Siswa Masuk ({daySubs.length} lembar kerja)
@@ -2389,7 +2491,7 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
                       <div className="grid sm:grid-cols-2 gap-2 text-xs">
                         {daySubs.map((sub) => {
                           const std = students.find(s => s.id === sub.studentId);
-                          const ex = exams.find(e => e.id === sub.examId);
+                          const ex = sub.examId ? exams.find(e => e.id === sub.examId) : null;
                           return (
                             <div key={sub.id} className="p-3 rounded-xl border bg-white flex items-center justify-between gap-2 shadow-xs">
                               <div>
@@ -2406,7 +2508,6 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
                     )}
                   </div>
 
-                  {/* 4. DAFTAR REKAP PRESENSI HARI INI */}
                   <div className="space-y-2 pt-2 border-t text-xs">
                     <h4 className="font-bold text-slate-700">Status Presensi Siswa ({Object.keys(dayRecs).length} siswa tercatat):</h4>
                     <div className="flex flex-wrap gap-2">
@@ -2456,7 +2557,6 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
               </button>
             </div>
 
-            {/* Filter Bar */}
             <div className="bg-white p-4 rounded-2xl border shadow-xs grid sm:grid-cols-3 gap-3 text-xs">
               <div>
                 <label className="block font-bold text-slate-700 mb-1">Filter Siswa</label>
@@ -2493,7 +2593,6 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
               </div>
             </div>
 
-            {/* Daftar Kronologis Evaluasi */}
             {(() => {
               const filtered = evaluations.filter((ev) => {
                 const matchStd = evalStudentFilter ? ev.studentId === evalStudentFilter : true;
@@ -2518,7 +2617,6 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
                     const studentObj = students.find((s) => s.id === ev.studentId);
                     const isDaily = ev.evalType === 'daily';
                     const isCorrection = ev.evalType === 'correction';
-                    const isMonthly = ev.evalType === 'monthly_summary';
 
                     return (
                       <div key={ev.id} className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm space-y-3">
@@ -2643,7 +2741,6 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
                         </button>
                       ))}
 
-                      {/* TOMBOL SIMPAN & KIRIM WA TERPISAH */}
                       <div className="flex gap-1.5 ml-2">
                         <button
                           onClick={() => handleSaveAttendanceRow(std)}
@@ -2722,7 +2819,6 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
               </div>
             </div>
 
-            {/* Riwayat 3 Bulan Sebelumnya */}
             <div className="bg-white rounded-2xl border p-5 shadow-sm space-y-3">
               <h3 className="font-bold text-sm text-slate-800">Riwayat SPP 3 Bulan Sebelumnya</h3>
               {previousThreeMonths.map((m) => (
@@ -2851,13 +2947,15 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
                   <div className="whitespace-pre-wrap bg-slate-50 border rounded-xl p-4 text-slate-800 leading-relaxed font-mono text-[11px] max-h-60 overflow-y-auto">
                     {viewingExamModal.docContent}
                   </div>
-                  {(viewingExamModal.questions || []).some(q => q.answerKey) && (
+                  {(viewingExamModal.questions || []).length > 0 && (
                     <div className="mt-3">
-                      <p className="font-bold text-slate-600 mb-2">Butir Soal & Kunci (dari edit)</p>
+                      <p className="font-bold text-slate-600 mb-2">Butir Soal Bernomor yang Terekstrak</p>
                       <div className="space-y-2">
                         {(viewingExamModal.questions || []).map((q, idx) => (
                           <div key={idx} className="p-3 rounded-xl bg-indigo-50 border border-indigo-100 space-y-1">
-                            <p className="font-bold text-slate-800">{q.no}. {q.text}</p>
+                            <p className="font-bold text-slate-800">
+                              {q.sectionLabel ? `[${q.sectionLabel}] ` : ''}{q.no}. {q.text}
+                            </p>
                             {q.answerKey && <p className="text-indigo-700 font-semibold">Kunci: {q.answerKey}</p>}
                           </div>
                         ))}
@@ -3045,7 +3143,6 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
                 ))}
               </div>
 
-              {/* Opsi Sertakan Halaman Kunci Jawaban */}
               <div className="p-3 rounded-xl bg-indigo-50/50 border border-indigo-100 flex items-center gap-2">
                 <input
                   type="checkbox"
