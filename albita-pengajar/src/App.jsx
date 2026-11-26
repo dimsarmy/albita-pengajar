@@ -100,21 +100,21 @@ const formatDateIndo = (dateStr) => {
   return dateStr;
 };
 
-// Helper: Kompres gambar sebelum dikirim ke Gemini Vision agar scan lebih cepat
+// Helper: Kompres gambar sebelum dikirim ke Gemini Vision agar scan lebih cepat & ringan
 const fileToGenerativePart = async (file) => {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = (ev) => {
       const img = new Image();
       img.onload = () => {
-        const maxWidth = 1280;
+        const maxWidth = 1024;
         const scale = img.width > maxWidth ? maxWidth / img.width : 1;
         const canvas = document.createElement('canvas');
         canvas.width = Math.round(img.width * scale);
         canvas.height = Math.round(img.height * scale);
         const ctx = canvas.getContext('2d');
         ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-        const dataUrl = canvas.toDataURL('image/jpeg', 0.78);
+        const dataUrl = canvas.toDataURL('image/jpeg', 0.72);
         resolve({
           inlineData: {
             data: dataUrl.split(',')[1],
@@ -136,6 +136,51 @@ const fileToGenerativePart = async (file) => {
     reader.onerror = reject;
     reader.readAsDataURL(file);
   });
+};
+
+// Helper: Panggil Gemini dengan Auto-Retry saat 503 / High Demand + Fallback Model
+const callGeminiWithRetry = async (contents, options = {}) => {
+  if (!genAI) throw new Error('VITE_GEMINI_API_KEY belum terpasang di environment.');
+
+  const candidateModels = ['gemini-3.8-flash', 'gemini-3.8-flash-lite', 'gemini-3-flash'];
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  let lastErr = null;
+
+  for (const modelName of candidateModels) {
+    const maxRetries = modelName === 'gemini-3.8-flash' ? 3 : 2;
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        const modelConfig = { model: modelName };
+        if (options.generationConfig) {
+          modelConfig.generationConfig = options.generationConfig;
+        }
+        const model = genAI.getGenerativeModel(modelConfig);
+        const result = await model.generateContent(contents);
+        return { text: result.response.text().trim(), usedModel: modelName };
+      } catch (err) {
+        lastErr = err;
+        const msg = String(err?.message || '');
+        const isTransient =
+          msg.includes('503') ||
+          msg.includes('429') ||
+          msg.toLowerCase().includes('high demand') ||
+          msg.toLowerCase().includes('overloaded') ||
+          msg.toLowerCase().includes('unavailable');
+
+        if (isTransient && attempt < maxRetries) {
+          await sleep(attempt * 1500);
+          continue;
+        }
+        if (msg.includes('404') || msg.toLowerCase().includes('not found')) {
+          break;
+        }
+        break;
+      }
+    }
+  }
+
+  throw lastErr || new Error('Server Gemini sedang sibuk (503). Silakan coba sesaat lagi.');
 };
 
 // Helper: Mengubah HTML hasil mammoth ke baris teks bersih per blok/sel tabel
@@ -1289,7 +1334,7 @@ export default function App() {
     }
   };
 
-  // SCAN KOREKSI JAWABAN SISWA (HANYA MEMAKAI GEMINI 3.8 FLASH)
+  // SCAN KOREKSI JAWABAN SISWA (DENGAN AUTO-RETRY 503 & FALLBACK MODEL)
   const handleScanPhoto = async (imageFile) => {
     if (!scanStudentId) {
       alert('Pilih siswa terlebih dahulu!');
@@ -1321,7 +1366,6 @@ export default function App() {
       let scanErrorMessage = '';
 
       if (genAI && imageFile) {
-        const modelNames = ['gemini-3.8-flash'];
         const imagePart = await fileToGenerativePart(imageFile);
 
         const referenceBlock = targetExam
@@ -1341,45 +1385,39 @@ ${referenceBlock}
 Balas HANYA JSON array:
 [{"no":1,"sectionLabel":"","displayNo":"No. 1","questionText":"","status":"wrong|corrected|incomplete|correct","ruleApplied":"","inkNote":"","topic":""}]`;
 
-        for (const modelName of modelNames) {
-          try {
-            const model = genAI.getGenerativeModel({
-              model: modelName,
-              generationConfig: { responseMimeType: 'application/json', temperature: 0.1 }
+        try {
+          const { text: responseText, usedModel } = await callGeminiWithRetry([prompt, imagePart], {
+            generationConfig: { responseMimeType: 'application/json', temperature: 0.1 }
+          });
+          const cleanJson = responseText.replace(/```json/gi, '').replace(/```/g, '').trim();
+          const parsed = JSON.parse(cleanJson);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            detectedResults = parsed.map((item, idx) => {
+              const noVal = item.no ?? idx + 1;
+              const qText = item.questionText || item.text || `Butir Soal No. ${noVal}`;
+              const isMath = isMathEquationLine(qText);
+              const rawSec = item.sectionLabel ? String(item.sectionLabel).trim() : '';
+              const secLabel = isMath && /inggris|english|preposition/i.test(rawSec) ? '' : rawSec;
+              const rawTopic = item.topic ? String(item.topic).trim() : '';
+              const cleanTopic = isMath && /inggris|english|preposition/i.test(rawTopic)
+                ? 'Matematika'
+                : (rawTopic || secLabel || (isMath ? 'Matematika' : 'Materi Latihan'));
+              return {
+                no: noVal,
+                sectionLabel: secLabel,
+                displayNo: item.displayNo || (secLabel ? `${secLabel} - No. ${noVal}` : `No. ${noVal}`),
+                questionText: qText,
+                status: ['wrong', 'corrected', 'incomplete', 'correct'].includes(item.status) ? item.status : 'correct',
+                ruleApplied: item.ruleApplied || '',
+                inkNote: item.inkNote || '',
+                topic: cleanTopic
+              };
             });
-            const result = await model.generateContent([prompt, imagePart]);
-            const responseText = result.response.text().trim();
-            const cleanJson = responseText.replace(/```json/gi, '').replace(/```/g, '').trim();
-            const parsed = JSON.parse(cleanJson);
-            if (Array.isArray(parsed) && parsed.length > 0) {
-              detectedResults = parsed.map((item, idx) => {
-                const noVal = item.no ?? idx + 1;
-                const qText = item.questionText || item.text || `Butir Soal No. ${noVal}`;
-                const isMath = isMathEquationLine(qText);
-                const rawSec = item.sectionLabel ? String(item.sectionLabel).trim() : '';
-                const secLabel = isMath && /inggris|english|preposition/i.test(rawSec) ? '' : rawSec;
-                const rawTopic = item.topic ? String(item.topic).trim() : '';
-                const cleanTopic = isMath && /inggris|english|preposition/i.test(rawTopic)
-                  ? 'Matematika'
-                  : (rawTopic || secLabel || (isMath ? 'Matematika' : 'Materi Latihan'));
-                return {
-                  no: noVal,
-                  sectionLabel: secLabel,
-                  displayNo: item.displayNo || (secLabel ? `${secLabel} - No. ${noVal}` : `No. ${noVal}`),
-                  questionText: qText,
-                  status: ['wrong', 'corrected', 'incomplete', 'correct'].includes(item.status) ? item.status : 'correct',
-                  ruleApplied: item.ruleApplied || '',
-                  inkNote: item.inkNote || '',
-                  topic: cleanTopic
-                };
-              });
-              aiNote = `Dianalisis menggunakan Gemini Vision (${modelName}).`;
-              break;
-            }
-          } catch (visionErr) {
-            console.warn(`Model ${modelName} gagal:`, visionErr);
-            scanErrorMessage = visionErr?.message || 'Gagal menghubungi Gemini Vision';
+            aiNote = `Dianalisis menggunakan Gemini Vision (${usedModel}).`;
           }
+        } catch (visionErr) {
+          console.warn('Scan AI gagal setelah retry/fallback:', visionErr);
+          scanErrorMessage = visionErr?.message || 'Server Gemini sedang sibuk (503). Silakan coba sesaat lagi.';
         }
       } else if (!apiKey) {
         scanErrorMessage = 'VITE_GEMINI_API_KEY belum terpasang di environment.';
@@ -1492,7 +1530,7 @@ Balas HANYA JSON array:
     }
   };
 
-  // GENERATOR SOAL REMEDIAL (HANYA MEMAKAI GEMINI 3.8 FLASH)
+  // GENERATOR SOAL REMEDIAL (DENGAN AUTO-RETRY 503 & FALLBACK MODEL)
   const handleGenerateRemedial = async () => {
     if (!lastScanResult || !lastScanResult.wrongQuestionsList || lastScanResult.wrongQuestionsList.length === 0) {
       alert('Tidak ada butir soal yang salah untuk dibuatkan remedial.');
@@ -1519,33 +1557,27 @@ Balas HANYA JSON array:
     let generatedQuestions = [];
 
     if (genAI) {
-      for (const mName of ['gemini-3.8-flash']) {
-        try {
-          const model = genAI.getGenerativeModel({
-            model: mName,
-            generationConfig: { responseMimeType: 'application/json', temperature: 0.2 }
-          });
-          const prompt = `Buatkan ${sourceQuestions.length} butir soal pembetulan/remedial yang setara untuk soal-soal berikut:
+      try {
+        const prompt = `Buatkan ${sourceQuestions.length} butir soal pembetulan/remedial yang setara untuk soal-soal berikut:
 ${sourceQuestions.map((q, idx) => `${idx + 1}. ${q.text} (Topik: ${q.topic})`).join('\n')}
 
 Tulis langsung teks pertanyaannya saja (tanpa kata "[Remedial]" atau "Latihan penguatan...").
 Balas HANYA JSON array: [{"no":1,"text":"...","topic":"..."}]`;
 
-          const res = await model.generateContent(prompt);
-          const resText = res.response.text().trim();
-          const clean = resText.replace(/```json/g, '').replace(/```/g, '').trim();
-          const parsed = JSON.parse(clean);
-          if (Array.isArray(parsed) && parsed.length > 0) {
-            generatedQuestions = parsed.map((item, idx) => ({
-              no: idx + 1,
-              text: String(item.text || sourceQuestions[idx]?.text || '').replace(/^\[?remedial\]?\s*[:\-]?\s*/i, '').trim(),
-              topic: item.topic || sourceQuestions[idx]?.topic || 'Materi'
-            }));
-            break;
-          }
-        } catch (err) {
-          console.warn(`Gemini remedial generator (${mName}) fallback:`, err);
+        const { text: resText } = await callGeminiWithRetry(prompt, {
+          generationConfig: { responseMimeType: 'application/json', temperature: 0.2 }
+        });
+        const clean = resText.replace(/```json/g, '').replace(/```/g, '').trim();
+        const parsed = JSON.parse(clean);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          generatedQuestions = parsed.map((item, idx) => ({
+            no: idx + 1,
+            text: String(item.text || sourceQuestions[idx]?.text || '').replace(/^\[?remedial\]?\s*[:\-]?\s*/i, '').trim(),
+            topic: item.topic || sourceQuestions[idx]?.topic || 'Materi'
+          }));
         }
+      } catch (err) {
+        console.warn('Gemini remedial generator fallback setelah retry:', err);
       }
     }
 
@@ -1686,7 +1718,7 @@ Balas HANYA JSON array: [{"no":1,"text":"...","topic":"..."}]`;
     URL.revokeObjectURL(url);
   };
 
-  // REKAP EVALUASI AKHIR BULAN (AI)
+  // REKAP EVALUASI AKHIR BULAN (AI DENGAN AUTO-RETRY 503 & FALLBACK MODEL)
   const handleGenerateMonthlyRecap = async () => {
     setIsGeneratingMonthly(true);
 
@@ -1711,12 +1743,10 @@ Balas HANYA JSON array: [{"no":1,"text":"...","topic":"..."}]`;
     let recapResultText = '';
 
     if (genAI) {
-      for (const mName of ['gemini-3.8-flash']) {
-        try {
-          const model = genAI.getGenerativeModel({ model: mName });
-          const evalLogs = filteredEvals.map(e => `[${e.dateKey}] (${e.evalType}): ${e.summaryText} (Topik: ${(e.weakTopics || []).join(', ')})`).join('\n');
+      try {
+        const evalLogs = filteredEvals.map(e => `[${e.dateKey}] (${e.evalType}): ${e.summaryText} (Topik: ${(e.weakTopics || []).join(', ')})`).join('\n');
 
-          const prompt = `Sebagai konsultan akademik Bimbel Albita, susunlah LAPORAN EVALUASI PERKEMBANGAN BULANAN siswa berikut untuk bulan ${monthName} ${yearNum}:
+        const prompt = `Sebagai konsultan akademik Bimbel Albita, susunlah LAPORAN EVALUASI PERKEMBANGAN BULANAN siswa berikut untuk bulan ${monthName} ${yearNum}:
 
 Nama Siswa: ${targetStudent ? targetStudent.name : 'Seluruh Siswa'}
 Kelas: ${targetStudent ? targetStudent.class : '-'}
@@ -1731,12 +1761,10 @@ Format Laporan yang harus kamu buat:
 
 Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur rapi.`;
 
-          const res = await model.generateContent(prompt);
-          recapResultText = res.response.text().trim();
-          if (recapResultText) break;
-        } catch (err) {
-          console.warn(`Gemini monthly recap (${mName}) fallback:`, err);
-        }
+        const { text } = await callGeminiWithRetry(prompt);
+        recapResultText = text;
+      } catch (err) {
+        console.warn('Gemini monthly recap fallback setelah retry:', err);
       }
     }
 
