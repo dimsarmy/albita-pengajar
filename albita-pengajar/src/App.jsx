@@ -138,13 +138,81 @@ const fileToGenerativePart = async (file) => {
   });
 };
 
-// Helper: Panggil Gemini dengan Auto-Retry saat 503 / High Demand + Fallback Model
-const callGeminiWithRetry = async (contents, options = {}) => {
-  if (!genAI) throw new Error('VITE_GEMINI_API_KEY belum terpasang di environment.');
+// Cache daftar model aktif milik API key agar tidak kena 404 model retired
+let cachedActiveGeminiModels = null;
 
-  const candidateModels = ['gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-2.0-flash'];
+const discoverAvailableGeminiModels = async () => {
+  if (cachedActiveGeminiModels && cachedActiveGeminiModels.length > 0) {
+    return cachedActiveGeminiModels;
+  }
+
+  const defaults = [
+    'gemini-3.8-flash',
+    'gemini-3-flash-preview',
+    'gemini-2.5-flash',
+    'gemini-2.5-pro',
+    'gemini-2.0-flash'
+  ];
+
+  if (!apiKey) return defaults;
+
+  try {
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(apiKey)}`
+    );
+    if (!res.ok) return defaults;
+
+    const data = await res.json();
+    const list = Array.isArray(data?.models) ? data.models : [];
+    const usable = list
+      .filter((m) => {
+        const methods = m.supportedGenerationMethods || [];
+        const name = String(m.name || '').toLowerCase();
+        return (
+          methods.includes('generateContent') &&
+          name.includes('gemini') &&
+          !name.includes('embedding') &&
+          !name.includes('imagen') &&
+          !name.includes('veo') &&
+          !name.includes('tts') &&
+          !name.includes('aqa') &&
+          !name.includes('robotics')
+        );
+      })
+      .map((m) => String(m.name || '').replace(/^models\//, ''));
+
+    if (usable.length > 0) {
+      // Prioritaskan model flash terbaru dulu, lalu gabungkan dengan sisanya
+      const preferredOrder = [
+        'gemini-3.8-flash',
+        'gemini-3.5-flash',
+        'gemini-3-flash',
+        'gemini-3-flash-preview',
+        'gemini-2.5-flash',
+        'gemini-2.5-pro'
+      ];
+      const sorted = [
+        ...preferredOrder.filter((p) => usable.includes(p)),
+        ...usable.filter((u) => !preferredOrder.includes(u))
+      ];
+      cachedActiveGeminiModels = sorted;
+      return sorted;
+    }
+  } catch (e) {
+    console.warn('Gagal mengambil daftar model Gemini otomatis:', e);
+  }
+
+  return defaults;
+};
+
+// Helper: Panggil Gemini dengan Auto-Discovery Model Aktif + Retry 503/429
+const callGeminiWithRetry = async (contents, options = {}) => {
+  if (!genAI || !apiKey) {
+    throw new Error('VITE_GEMINI_API_KEY belum terpasang di environment.');
+  }
+
+  const candidateModels = await discoverAvailableGeminiModels();
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  let primaryErr = null;
   let lastErr = null;
 
   for (let i = 0; i < candidateModels.length; i++) {
@@ -162,9 +230,13 @@ const callGeminiWithRetry = async (contents, options = {}) => {
         return { text: result.response.text().trim(), usedModel: modelName };
       } catch (err) {
         lastErr = err;
-        if (i === 0 && !primaryErr) primaryErr = err;
-
         const msg = String(err?.message || '');
+
+        // Jika 404 (model tidak tersedia untuk key ini), langsung pindah ke model berikutnya tanpa retry
+        if (msg.includes('404') || msg.toLowerCase().includes('not found') || msg.toLowerCase().includes('no longer available')) {
+          break;
+        }
+
         const isTransient =
           msg.includes('503') ||
           msg.includes('429') ||
@@ -181,7 +253,9 @@ const callGeminiWithRetry = async (contents, options = {}) => {
     }
   }
 
-  throw primaryErr || lastErr || new Error('Gagal menghubungi Gemini API.');
+  // Bersihkan cache jika semua gagal agar percobaan berikutnya bisa cek ulang
+  cachedActiveGeminiModels = null;
+  throw lastErr || new Error('Gagal menghubungi Gemini API.');
 };
 
 // Helper: Mengubah HTML hasil mammoth ke baris teks bersih per blok/sel tabel
@@ -1335,7 +1409,7 @@ export default function App() {
     }
   };
 
-  // SCAN KOREKSI JAWABAN SISWA (DENGAN AUTO-RETRY 503 & FALLBACK MODEL)
+  // SCAN KOREKSI JAWABAN SISWA (AUTO-DISCOVERY MODEL + RETRY)
   const handleScanPhoto = async (imageFile) => {
     if (!scanStudentId) {
       alert('Pilih siswa terlebih dahulu!');
@@ -1418,7 +1492,7 @@ Balas HANYA JSON array:
           }
         } catch (visionErr) {
           console.warn('Scan AI gagal setelah retry/fallback:', visionErr);
-          scanErrorMessage = visionErr?.message || 'Server Gemini sedang sibuk (503). Silakan coba sesaat lagi.';
+          scanErrorMessage = visionErr?.message || 'Gagal menghubungi server Gemini.';
         }
       } else if (!apiKey) {
         scanErrorMessage = 'VITE_GEMINI_API_KEY belum terpasang di environment.';
@@ -1531,7 +1605,7 @@ Balas HANYA JSON array:
     }
   };
 
-  // GENERATOR SOAL REMEDIAL (DENGAN AUTO-RETRY 503 & FALLBACK MODEL)
+  // GENERATOR SOAL REMEDIAL (AUTO-DISCOVERY MODEL + RETRY)
   const handleGenerateRemedial = async () => {
     if (!lastScanResult || !lastScanResult.wrongQuestionsList || lastScanResult.wrongQuestionsList.length === 0) {
       alert('Tidak ada butir soal yang salah untuk dibuatkan remedial.');
@@ -1719,7 +1793,7 @@ Balas HANYA JSON array: [{"no":1,"text":"...","topic":"..."}]`;
     URL.revokeObjectURL(url);
   };
 
-  // REKAP EVALUASI AKHIR BULAN (AI DENGAN AUTO-RETRY 503 & FALLBACK MODEL)
+  // REKAP EVALUASI AKHIR BULAN (AI DENGAN AUTO-DISCOVERY MODEL + RETRY)
   const handleGenerateMonthlyRecap = async () => {
     setIsGeneratingMonthly(true);
 
