@@ -142,12 +142,14 @@ const fileToGenerativePart = async (file) => {
 const callGeminiWithRetry = async (contents, options = {}) => {
   if (!genAI) throw new Error('VITE_GEMINI_API_KEY belum terpasang di environment.');
 
-  const candidateModels = ['gemini-3.8-flash', 'gemini-3.8-flash-lite', 'gemini-3-flash'];
+  const candidateModels = ['gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-2.0-flash'];
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  let primaryErr = null;
   let lastErr = null;
 
-  for (const modelName of candidateModels) {
-    const maxRetries = modelName === 'gemini-3.8-flash' ? 3 : 2;
+  for (let i = 0; i < candidateModels.length; i++) {
+    const modelName = candidateModels[i];
+    const maxRetries = i === 0 ? 3 : 2;
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
@@ -160,6 +162,8 @@ const callGeminiWithRetry = async (contents, options = {}) => {
         return { text: result.response.text().trim(), usedModel: modelName };
       } catch (err) {
         lastErr = err;
+        if (i === 0 && !primaryErr) primaryErr = err;
+
         const msg = String(err?.message || '');
         const isTransient =
           msg.includes('503') ||
@@ -172,15 +176,12 @@ const callGeminiWithRetry = async (contents, options = {}) => {
           await sleep(attempt * 1500);
           continue;
         }
-        if (msg.includes('404') || msg.toLowerCase().includes('not found')) {
-          break;
-        }
         break;
       }
     }
   }
 
-  throw lastErr || new Error('Server Gemini sedang sibuk (503). Silakan coba sesaat lagi.');
+  throw primaryErr || lastErr || new Error('Gagal menghubungi Gemini API.');
 };
 
 // Helper: Mengubah HTML hasil mammoth ke baris teks bersih per blok/sel tabel
