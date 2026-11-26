@@ -31,14 +31,10 @@ import {
   Download,
   Clock,
   Check,
-  ClipboardList,
   BookOpen,
   FileCheck,
-  RefreshCw,
-  Share2,
   Copy,
   Award,
-  HelpCircle,
   ArrowRight
 } from 'lucide-react';
 
@@ -72,8 +68,7 @@ const formatWaNumber = (num) => {
 
 // Helper: Normalisasi berbagai format tanggal menjadi YYYY-MM-DD
 const normalizeDateKey = (val) => {
-  if (!val) return '';
-  if (typeof val !== 'string') return '';
+  if (!val || typeof val !== 'string') return '';
   const ymdMatch = val.match(/^(\d{4})-(\d{2})-(\d{2})/);
   if (ymdMatch) return `${ymdMatch[1]}-${ymdMatch[2]}-${ymdMatch[3]}`;
 
@@ -92,7 +87,7 @@ const normalizeDateKey = (val) => {
   return '';
 };
 
-// Helper: Format tanggal YYYY-MM-DD menjadi format teks Indonesia (misal: 24 November 2026)
+// Helper: Format tanggal YYYY-MM-DD menjadi format teks Indonesia
 const formatDateIndo = (dateStr) => {
   if (!dateStr) return '-';
   const parts = dateStr.split('-');
@@ -105,18 +100,38 @@ const formatDateIndo = (dateStr) => {
   return dateStr;
 };
 
-// Helper: Convert File to inlineData for Gemini Vision
+// Helper: Kompres gambar sebelum dikirim ke Gemini Vision agar scan lebih cepat
 const fileToGenerativePart = async (file) => {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.onloadend = () => {
-      const base64Data = reader.result.split(',')[1];
-      resolve({
-        inlineData: {
-          data: base64Data,
-          mimeType: file.type || 'image/jpeg'
-        }
-      });
+    reader.onload = (ev) => {
+      const img = new Image();
+      img.onload = () => {
+        const maxWidth = 1280;
+        const scale = img.width > maxWidth ? maxWidth / img.width : 1;
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.round(img.width * scale);
+        canvas.height = Math.round(img.height * scale);
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        const dataUrl = canvas.toDataURL('image/jpeg', 0.78);
+        resolve({
+          inlineData: {
+            data: dataUrl.split(',')[1],
+            mimeType: 'image/jpeg'
+          }
+        });
+      };
+      img.onerror = () => {
+        const base64Data = String(ev.target.result || '').split(',')[1] || '';
+        resolve({
+          inlineData: {
+            data: base64Data,
+            mimeType: file.type || 'image/jpeg'
+          }
+        });
+      };
+      img.src = ev.target.result;
     };
     reader.onerror = reject;
     reader.readAsDataURL(file);
@@ -144,7 +159,24 @@ const htmlToCleanLines = (htmlString = '') => {
     .filter(Boolean);
 };
 
-// Helper: Mengekstrak SELURUH butir soal bernomor secara berurutan & rapi
+// Deteksi apakah baris adalah persamaan/operasi hitung matematika
+const isMathEquationLine = (line = '') => {
+  const hasEquals = /=/.test(line);
+  const hasMathOps = /[+\-×x÷*/]/.test(line) && /\d|\.{3,}|_{3,}/.test(line);
+  return hasEquals || hasMathOps;
+};
+
+// Deteksi apakah baris adalah judul bagian eksplisit
+const isExplicitSectionHeader = (line = '') => {
+  if (isMathEquationLine(line)) return false;
+  return (
+    /^(bagian|bab|unit|part)\s*\d+/i.test(line) ||
+    /^(soal\s+)?(bahasa\s+inggris|matematika|bahasa\s+indonesia|ipa|ipas|biologi|fisika|ppkn|pkn)\b/i.test(line) ||
+    /^b\.\s+[a-zA-Z]/i.test(line)
+  );
+};
+
+// Helper: Mengekstrak SELURUH butir soal bernomor & bersusun ke bawah dengan label mapel akurat
 const extractNumberedQuestionsFromText = (rawText = '', htmlFallback = '') => {
   const skippedExact = new Set([
     'soal',
@@ -165,7 +197,6 @@ const extractNumberedQuestionsFromText = (rawText = '', htmlFallback = '') => {
     .map((l) => l.replace(/\t+/g, ' ').replace(/\s+/g, ' ').trim())
     .filter(Boolean);
 
-  // Gabungkan atau pilih sumber baris yang lebih lengkap jumlah barisnya
   const sourceLines = htmlLines.length >= plainLines.length && htmlLines.length > 0
     ? htmlLines
     : plainLines;
@@ -176,10 +207,25 @@ const extractNumberedQuestionsFromText = (rawText = '', htmlFallback = '') => {
   const items = [];
   let activeItem = null;
 
+  const getNextAutoNumber = () => {
+    const usedNums = new Set(items.map((it) => Number(it.no)).filter((n) => !Number.isNaN(n)));
+    let candidate = items.length + 1;
+    while (usedNums.has(candidate)) {
+      candidate += 1;
+    }
+    return candidate;
+  };
+
   const flushActive = () => {
     if (activeItem && activeItem.text.trim()) {
+      const isMath = isMathEquationLine(activeItem.text);
+      const secLabel = isMath
+        ? (currentSection && /matematika|hitung|angka/i.test(currentSection) ? currentSection : '')
+        : activeItem.sectionLabel;
       items.push({
         ...activeItem,
+        sectionLabel: secLabel,
+        topic: secLabel || (isMath ? 'Matematika' : 'Materi'),
         text: activeItem.text.replace(/\s+/g, ' ').trim()
       });
     }
@@ -189,11 +235,7 @@ const extractNumberedQuestionsFromText = (rawText = '', htmlFallback = '') => {
   for (const line of sourceLines) {
     const lower = line.toLowerCase();
 
-    // Deteksi judul bagian seperti "B. Soal Bahasa Inggris", "Bagian 1: ...", "Soal Bahasa Inggris (...)"
-    if (
-      /^(b\.|bagian|bab|unit|part)\s*\d*/i.test(line) ||
-      /^soal\s+bahasa\s+/i.test(line)
-    ) {
+    if (isExplicitSectionHeader(line)) {
       flushActive();
       currentSection = line;
       sectionRepeatCounter = 0;
@@ -201,7 +243,6 @@ const extractNumberedQuestionsFromText = (rawText = '', htmlFallback = '') => {
       continue;
     }
 
-    // Lewati baris non-soal (nama siswa, *Pembetulan, judul Soal, instruksi)
     if (
       skippedExact.has(lower) ||
       lower.startsWith('*pembetulan') ||
@@ -212,9 +253,9 @@ const extractNumberedQuestionsFromText = (rawText = '', htmlFallback = '') => {
       continue;
     }
 
-    // Cocokkan awal butir bernomor: "1. ...", "9 .....", "14) ..."
+    // Format nomor eksplisit di awal baris: "1. ...", "9 .....", "14) ..." (bukan persamaan "19 + ... = 45")
     const match = line.match(/^(?:no\.?\s*|soal\s*)?\(?(\d{1,3})\)?\s*(?:[.):\-]+|\s+)(.+)$/i);
-    if (match) {
+    if (match && !isMathEquationLine(line)) {
       flushActive();
       const noVal = parseInt(match[1], 10);
       const bodyText = match[2].trim();
@@ -225,9 +266,8 @@ const extractNumberedQuestionsFromText = (rawText = '', htmlFallback = '') => {
       }
       seenNumbersInSection.add(noVal);
 
-      const baseLabel = currentSection || 'Bagian Soal';
-      const effectiveSection = sectionRepeatCounter > 0
-        ? `${baseLabel} (Lanjutan ${sectionRepeatCounter + 1})`
+      const effectiveSection = sectionRepeatCounter > 0 && currentSection
+        ? `${currentSection} (Lanjutan ${sectionRepeatCounter + 1})`
         : currentSection;
 
       activeItem = {
@@ -237,16 +277,35 @@ const extractNumberedQuestionsFromText = (rawText = '', htmlFallback = '') => {
         answerKey: '',
         topic: effectiveSection || 'Materi'
       };
-    } else if (activeItem) {
-      activeItem.text += ` ${line}`;
-    } else if (line.length > 1) {
-      // Baris teks di luar nomor tetap ditangkap agar tidak ada soal yang hilang
+      continue;
+    }
+
+    // Jika baris berupa persamaan/soal matematika (termasuk yang bersusun ke bawah tanpa nomor)
+    if (isMathEquationLine(line)) {
+      flushActive();
+      const isMathSec = currentSection && /matematika|hitung|angka/i.test(currentSection);
+      const secLabel = isMathSec ? currentSection : '';
       items.push({
-        no: items.length + 1,
-        sectionLabel: currentSection || 'Catatan/Soal',
+        no: getNextAutoNumber(),
+        sectionLabel: secLabel,
         text: line,
         answerKey: '',
-        topic: currentSection || 'Materi'
+        topic: secLabel || 'Matematika'
+      });
+      continue;
+    }
+
+    // Jika ada lanjutan kalimat/pilihan jawaban dari soal aktif (bukan soal baru)
+    if (activeItem && !/^(a\.|b\.|c\.|d\.)\s+/i.test(line)) {
+      activeItem.text += ` ${line}`;
+    } else if (line.length > 1) {
+      const secLabel = currentSection || '';
+      items.push({
+        no: getNextAutoNumber(),
+        sectionLabel: secLabel,
+        text: line,
+        answerKey: '',
+        topic: secLabel || 'Materi'
       });
     }
   }
@@ -303,7 +362,6 @@ export default function App() {
     }
   });
 
-  // Simpan setiap perubahan exams ke localStorage agar tidak hilang saat refresh
   useEffect(() => {
     try {
       localStorage.setItem('albita_exams', JSON.stringify(exams));
@@ -320,7 +378,6 @@ export default function App() {
     }
   }, [submissions]);
 
-  // Absensi dengan instant persistence (localStorage cache + Supabase Cloud Sync)
   const [attendanceRecords, setAttendanceRecords] = useState(() => {
     try {
       const cached = localStorage.getItem('albita_attendance');
@@ -330,7 +387,6 @@ export default function App() {
     }
   });
 
-  // Array data absensi terformat untuk kalkulasi ringkasan kalender
   const attendanceList = useMemo(() => {
     const list = [];
     Object.entries(attendanceRecords).forEach(([dKey, stdMap]) => {
@@ -350,7 +406,6 @@ export default function App() {
   const [payments, setPayments] = useState({});
   const [teacherNotes, setTeacherNotes] = useState({});
 
-  // State Evaluasi (Harian, Pembetulan, dan Rekap Bulanan)
   const [evaluations, setEvaluations] = useState(() => {
     try {
       const cached = localStorage.getItem('albita_evaluations');
@@ -360,17 +415,14 @@ export default function App() {
     }
   });
 
-  // State Pilihan Tanggal Soal Bank Soal & Tanggal Scan
   const [uploadExamDate, setUploadExamDate] = useState(todayKey);
   const [editExamDate, setEditExamDate] = useState(todayKey);
   const [scanDate, setScanDate] = useState(todayKey);
 
-  // State Navigasi Kalender
   const [calMonthIdx, setCalMonthIdx] = useState(now.getMonth());
   const [calYear, setCalYear] = useState(now.getFullYear());
   const [selectedCalDate, setSelectedCalDate] = useState(todayKey);
 
-  // Sinkronisasi data real-time dengan Supabase Cloud Database
   useEffect(() => {
     if (!supabase) return;
 
@@ -540,7 +592,6 @@ export default function App() {
   const [newStudentClass, setNewStudentClass] = useState('6 SD');
   const [newWhatsapp, setNewWhatsapp] = useState('');
 
-  // State Bank Soal (Pengajar bisa Edit & View)
   const [viewingExamModal, setViewingExamModal] = useState(null);
   const [editingExamModal, setEditingExamModal] = useState(null);
   const [editExamTitle, setEditExamTitle] = useState('');
@@ -548,26 +599,21 @@ export default function App() {
   const [editExamQuestions, setEditExamQuestions] = useState([]);
   const [isUploadingDoc, setIsUploadingDoc] = useState(false);
 
-  // State Scan AI Vision
   const [scanStudentId, setScanStudentId] = useState('');
   const [scanExamId, setScanExamId] = useState('');
   const [isScanning, setIsScanning] = useState(false);
   const [lastScanResult, setLastScanResult] = useState(null);
   const [scanPreviewImage, setScanPreviewImage] = useState(null);
 
-  // State Generator Soal Remedial
   const [remedialModal, setRemedialModal] = useState(null);
   const [isGeneratingRemedial, setIsGeneratingRemedial] = useState(false);
-  const [includeExplanationsInExport, setIncludeExplanationsInExport] = useState(true);
 
-  // State Evaluasi
   const [evalStudentFilter, setEvalStudentFilter] = useState('');
   const [evalMonthFilter, setEvalMonthFilter] = useState(currentMonthKey);
   const [evalTypeFilter, setEvalTypeFilter] = useState('all');
   const [monthlyRecapModal, setMonthlyRecapModal] = useState(null);
   const [isGeneratingMonthly, setIsGeneratingMonthly] = useState(false);
 
-  // State Absensi
   const [todayAttendanceDraft, setTodayAttendanceDraft] = useState({});
   const [attendanceDirty, setAttendanceDirty] = useState({});
 
@@ -575,7 +621,6 @@ export default function App() {
   const [noteDrafts, setNoteDrafts] = useState({});
   const [noteSavedAlert, setNoteSavedAlert] = useState({});
 
-  // Helper untuk menyimpan evaluasi ke Supabase dan localStorage
   const saveEvaluationRecord = async (newEval) => {
     setEvaluations(prev => {
       const updated = [newEval, ...prev.filter(e => e.id !== newEval.id)];
@@ -602,7 +647,7 @@ export default function App() {
     }
   };
 
-  // MODE VIEW-ONLY UNTUK ORANG TUA (LINK ARSIP SOAL)
+  // MODE VIEW-ONLY UNTUK ORANG TUA
   if (viewStudentParam) {
     const targetStudent = students.find((s) => s.id === viewStudentParam);
     const studentSubs = submissions.filter((sub) => sub.studentId === viewStudentParam);
@@ -718,13 +763,11 @@ export default function App() {
     }
   };
 
-  // Absensi Selection
   const handleSelectAttendance = (studentId, status) => {
     setTodayAttendanceDraft(prev => ({ ...prev, [studentId]: status }));
     setAttendanceDirty(prev => ({ ...prev, [studentId]: true }));
   };
 
-  // Simpan Absensi (HANYA SIMPAN KE DATABASE & LOCALSTORAGE, TANPA KIRIM WA)
   const handleSaveAttendanceRow = async (student) => {
     const chosenStatus = todayAttendanceDraft[student.id] || attendanceRecords[todayKey]?.[student.id];
     if (!chosenStatus) return;
@@ -753,7 +796,6 @@ export default function App() {
     }
   };
 
-  // Kirim Notifikasi Absensi via WhatsApp (TERPISAH)
   const handleSendAttendanceWA = (student) => {
     const savedToday = attendanceRecords[todayKey]?.[student.id];
     const draft = todayAttendanceDraft[student.id];
@@ -883,9 +925,7 @@ export default function App() {
     }
   };
 
-  // ==============================================================
-  // FITUR 1: UPLOAD DOKUMEN BANK SOAL DENGAN PILIHAN TANGGAL SOAL
-  // ==============================================================
+  // UPLOAD DOKUMEN BANK SOAL
   const handleUploadTeacherExam = async (file, customDate = uploadExamDate) => {
     if (!file) return;
     setIsUploadingDoc(true);
@@ -966,7 +1006,6 @@ export default function App() {
     }
   };
 
-  // FITUR EDIT BANK SOAL (TERMASUK EDIT TANGGAL SOAL)
   const handleOpenEditExam = (exam) => {
     setEditingExamModal(exam);
     setEditExamTitle(exam.title || '');
@@ -1134,9 +1173,7 @@ export default function App() {
     }
   };
 
-  // ==============================================================
-  // FITUR 1 & 2: SCAN KOREKSI JAWABAN SISWA (MEMBACA SELURUH BUTIR & NOMOR ASLI)
-  // ==============================================================
+  // SCAN KOREKSI JAWABAN SISWA (DIPERCEPAT + AKURAT MEMBACA MAPEL ASLI)
   const handleScanPhoto = async (imageFile) => {
     if (!scanStudentId) {
       alert('Pilih siswa terlebih dahulu!');
@@ -1172,43 +1209,28 @@ export default function App() {
         const imagePart = await fileToGenerativePart(imageFile);
 
         const referenceBlock = targetExam
-          ? `\nDaftar Butir Soal Acuan Opsional:\n${(targetExam.questions || []).map(q => `Nomor ${q.no}: ${q.text} (Kunci: ${q.answerKey || '-'})`).join('\n')}`
-          : '\nTidak ada paket soal acuan yang dipilih. Baca langsung seluruh butir soal bernomor yang terlihat di foto.';
+          ? `\nAcuan opsional:\n${(targetExam.questions || []).map(q => `No.${q.no}: ${q.text}`).join('\n')}`
+          : '';
 
-        const prompt = `Kamu adalah AI ahli koreksi lembar jawaban siswa di Bimbel Albita.
-Tugasmu: Baca SETIAP butir soal BERNOMOR yang terlihat pada foto lembar jawaban siswa dari awal sampai akhir (termasuk di kolom/bagian berbeda), jangan ada nomor soal yang dilewati. Lalu tentukan status setiap nomor berdasarkan aturan koreksi berikut:
-
-ABAIKAN TOTAL (jangan dijadikan butir soal):
-- Nama siswa di atas kertas
-- Label/judul seperti "*Pembetulan", "Soal", "Bagian 1", "B. Soal..."
-- Kalimat perintah/instruksi umum
-
-Gunakan NOMOR SOAL ASLI yang tertera di kertas (sertakan sectionLabel & displayNo seperti "Bagian 1 - No. 8" bila ada bagian yang mulai dari nomor 1 lagi; jangan mengurutkan ulang nomor menjadi angka baru).
-
-Aturan 1 (Salah): Terdapat tanda silang (X) menggunakan pulpen merah saja -> status: "wrong"
-Aturan 2 (Salah): Tanda silang merah bertumpuk dengan tinta biru DAN terdapat tulisan/kata 'salah' di sebelah nomor soal -> status: "wrong"
-Aturan 3 (Sudah Dibenarkan): Tanda silang merah bertumpuk dengan tinta biru TANPA ada kata 'salah' di sebelah nomor soal -> status: "corrected"
-Aturan 4 (Benar Kurang Lengkap): Terdapat lingkaran merah -> status: "incomplete"
-Aturan 5 (Benar): Tanda centang atau jawaban benar tanpa silang merah -> status: "correct"
+        const prompt = `Baca seluruh butir soal bernomor (termasuk yang bersusun ke bawah) di foto lembar jawaban siswa.
+Abaikan nama siswa, label "*Pembetulan", judul bagian, dan instruksi.
+Pertahankan nomor asli di kertas (gunakan displayNo bila ada bagian terpisah).
+Tentukan topic sesuai isi butir soalnya (jangan menyamakan soal matematika/angka sebagai Bahasa Inggris).
+Aturan status:
+- "wrong": tanda silang (X) merah saja, ATAU silang merah + tinta biru + ada tulisan "salah"
+- "corrected": silang merah + tinta biru TANPA tulisan "salah"
+- "incomplete": lingkaran merah
+- "correct": benar / centang / tanpa silang merah
 ${referenceBlock}
-
-Kembalikan HANYA format JSON murni (array of objects) tanpa awalan/akhiran markdown codeblock, dengan struktur:
-[
-  {
-    "no": 1,
-    "sectionLabel": "",
-    "displayNo": "No. 1",
-    "questionText": "Teks soal dari foto",
-    "status": "wrong" | "corrected" | "incomplete" | "correct",
-    "ruleApplied": "Aturan 1: Silang merah saja" atau sejenisnya,
-    "inkNote": "Deskripsi tanda tinta yang terdeteksi pada nomor ini",
-    "topic": "Topik bahasan materi soal"
-  }
-]`;
+Balas HANYA JSON array:
+[{"no":1,"sectionLabel":"","displayNo":"No. 1","questionText":"","status":"wrong|corrected|incomplete|correct","ruleApplied":"","inkNote":"","topic":""}]`;
 
         for (const modelName of modelNames) {
           try {
-            const model = genAI.getGenerativeModel({ model: modelName });
+            const model = genAI.getGenerativeModel({
+              model: modelName,
+              generationConfig: { responseMimeType: 'application/json', temperature: 0.1 }
+            });
             const result = await model.generateContent([prompt, imagePart]);
             const responseText = result.response.text().trim();
             const cleanJson = responseText.replace(/```json/gi, '').replace(/```/g, '').trim();
@@ -1216,16 +1238,23 @@ Kembalikan HANYA format JSON murni (array of objects) tanpa awalan/akhiran markd
             if (Array.isArray(parsed) && parsed.length > 0) {
               detectedResults = parsed.map((item, idx) => {
                 const noVal = item.no ?? idx + 1;
-                const secLabel = item.sectionLabel ? String(item.sectionLabel).trim() : '';
+                const qText = item.questionText || item.text || `Butir Soal No. ${noVal}`;
+                const isMath = isMathEquationLine(qText);
+                const rawSec = item.sectionLabel ? String(item.sectionLabel).trim() : '';
+                const secLabel = isMath && /inggris|english|preposition/i.test(rawSec) ? '' : rawSec;
+                const rawTopic = item.topic ? String(item.topic).trim() : '';
+                const cleanTopic = isMath && /inggris|english|preposition/i.test(rawTopic)
+                  ? 'Matematika'
+                  : (rawTopic || secLabel || (isMath ? 'Matematika' : 'Materi Latihan'));
                 return {
                   no: noVal,
                   sectionLabel: secLabel,
                   displayNo: item.displayNo || (secLabel ? `${secLabel} - No. ${noVal}` : `No. ${noVal}`),
-                  questionText: item.questionText || item.text || `Butir Soal No. ${noVal}`,
+                  questionText: qText,
                   status: ['wrong', 'corrected', 'incomplete', 'correct'].includes(item.status) ? item.status : 'correct',
                   ruleApplied: item.ruleApplied || '',
                   inkNote: item.inkNote || '',
-                  topic: item.topic || secLabel || 'Materi Latihan'
+                  topic: cleanTopic
                 };
               });
               aiNote = `Dianalisis menggunakan Gemini Vision (${modelName}).`;
@@ -1347,7 +1376,7 @@ Kembalikan HANYA format JSON murni (array of objects) tanpa awalan/akhiran markd
     }
   };
 
-  // GENERATOR SOAL REMEDIAL
+  // GENERATOR SOAL REMEDIAL (CEPAT, TANPA AWALAN BERTELE-TELE, BISA EDIT NAMA SISWA)
   const handleGenerateRemedial = async () => {
     if (!lastScanResult || !lastScanResult.wrongQuestionsList || lastScanResult.wrongQuestionsList.length === 0) {
       alert('Tidak ada butir soal yang salah untuk dibuatkan remedial.');
@@ -1361,12 +1390,13 @@ Kembalikan HANYA format JSON murni (array of objects) tanpa awalan/akhiran markd
 
     const sourceQuestions = wrongItems.map((w) => {
       const matched = (originalExam?.questions || []).find(q => q.no === w.no);
+      const qText = w.questionText || matched?.text || `Butir Soal ${w.displayNo || `No. ${w.no}`}`;
+      const isMath = isMathEquationLine(qText);
       return {
         no: w.no,
         displayNo: w.displayNo || `No. ${w.no}`,
-        text: w.questionText || matched?.text || `Butir Soal ${w.displayNo || `No. ${w.no}`}`,
-        answerKey: matched?.answerKey || '',
-        topic: w.topic || matched?.topic || 'Materi'
+        text: qText,
+        topic: isMath ? 'Matematika' : (w.topic || matched?.topic || 'Materi')
       };
     });
 
@@ -1375,33 +1405,26 @@ Kembalikan HANYA format JSON murni (array of objects) tanpa awalan/akhiran markd
     if (genAI) {
       for (const mName of ['gemini-3.8-flash', 'gemini-2.5-flash']) {
         try {
-          const model = genAI.getGenerativeModel({ model: mName });
-          const prompt = `Sebagai pengajar Bimbel Albita, buatkan paket soal remedial yang setara dan sejenis dengan butir-butir soal yang salah berikut:
+          const model = genAI.getGenerativeModel({
+            model: mName,
+            generationConfig: { responseMimeType: 'application/json', temperature: 0.2 }
+          });
+          const prompt = `Buatkan ${sourceQuestions.length} butir soal pembetulan/remedial yang setara untuk soal-soal berikut:
+${sourceQuestions.map((q, idx) => `${idx + 1}. ${q.text} (Topik: ${q.topic})`).join('\n')}
 
-${sourceQuestions.map(q => `Soal Asli (${q.displayNo}): ${q.text} (Topik: ${q.topic || 'Materi'})`).join('\n\n')}
-
-Instruksi:
-1. Buat soal latihan baru yang konsep dan tingkat kesulitannya setara dengan soal asli.
-2. Sertakan Kunci Jawaban singkat.
-3. Sertakan Pembahasan langkah pengerjaan yang jelas dan mendidik untuk siswa.
-
-Kembalikan HANYA array JSON murni tanpa markdown codeblock:
-[
-  {
-    "no": 1,
-    "text": "Pertanyaan soal remedial...",
-    "answerKey": "Kunci jawaban...",
-    "explanation": "Langkah pengerjaan pembahasan...",
-    "topic": "Topik Materi"
-  }
-]`;
+Tulis langsung teks pertanyaannya saja (tanpa kata "[Remedial]" atau "Latihan penguatan...").
+Balas HANYA JSON array: [{"no":1,"text":"...","topic":"..."}]`;
 
           const res = await model.generateContent(prompt);
           const resText = res.response.text().trim();
           const clean = resText.replace(/```json/g, '').replace(/```/g, '').trim();
           const parsed = JSON.parse(clean);
           if (Array.isArray(parsed) && parsed.length > 0) {
-            generatedQuestions = parsed;
+            generatedQuestions = parsed.map((item, idx) => ({
+              no: idx + 1,
+              text: String(item.text || sourceQuestions[idx]?.text || '').replace(/^\[?remedial\]?\s*[:\-]?\s*/i, '').trim(),
+              topic: item.topic || sourceQuestions[idx]?.topic || 'Materi'
+            }));
             break;
           }
         } catch (err) {
@@ -1413,17 +1436,15 @@ Kembalikan HANYA array JSON murni tanpa markdown codeblock:
     if (!generatedQuestions || generatedQuestions.length === 0) {
       generatedQuestions = sourceQuestions.map((q, idx) => ({
         no: idx + 1,
-        text: `[Remedial] Latihan penguatan konsep setara (${q.displayNo}): ${q.text}`,
-        answerKey: q.answerKey ? `Kunci Pembetulan: ${q.answerKey}` : 'Jawaban Tepat',
-        explanation: 'Langkah penyelesaian: Pahami kembali konsep dasar, teliti operasi hitung langkah demi langkah, dan periksa kembali hasil akhir.',
-        topic: q.topic || 'Pemantapan Materi'
+        text: q.text,
+        topic: q.topic || 'Materi'
       }));
     }
 
     setRemedialModal({
       originalExamTitle: baseTitle,
       remedialTitle: `Pembetulan - ${baseTitle}`,
-      subject: originalExam?.subject || 'Bank Soal Guru',
+      subject: originalExam?.subject || 'Pembetulan Soal',
       studentName: lastScanResult.student?.name || 'Siswa',
       examDate: lastScanResult.submission?.examDate || scanDate || todayKey,
       questions: generatedQuestions
@@ -1456,7 +1477,7 @@ Kembalikan HANYA array JSON murni tanpa markdown codeblock:
       questions: remedialModal.questions.map((q, idx) => ({
         no: idx + 1,
         text: q.text,
-        answerKey: q.answerKey,
+        answerKey: '',
         topic: q.topic || 'Pembetulan'
       }))
     };
@@ -1485,7 +1506,7 @@ Kembalikan HANYA array JSON murni tanpa markdown codeblock:
       }
     }
 
-    alert(`Paket "${newRemedialExam.title}" berhasil disimpan ke Bank Soal untuk tanggal ${formatDateIndo(targetDateKey)}! Besok bisa langsung diberikan ke siswa.`);
+    alert(`Paket "${newRemedialExam.title}" berhasil disimpan ke Bank Soal untuk tanggal ${formatDateIndo(targetDateKey)}!`);
     setRemedialModal(null);
   };
 
@@ -1502,7 +1523,7 @@ Kembalikan HANYA array JSON murni tanpa markdown codeblock:
 
     pdf.setFontSize(10);
     pdf.setFont('helvetica', 'normal');
-    pdf.text(`Nama Siswa: ${remedialModal.studentName}   |   Tanggal: ${formatDateIndo(remedialModal.examDate || todayKey)}`, margin, y);
+    pdf.text(`Nama Siswa: ${remedialModal.studentName || '-'}   |   Tanggal: ${formatDateIndo(remedialModal.examDate || todayKey)}`, margin, y);
     y += 10;
 
     pdf.setDrawColor(200, 200, 200);
@@ -1510,8 +1531,8 @@ Kembalikan HANYA array JSON murni tanpa markdown codeblock:
     y += 8;
 
     pdf.setFontSize(11);
-    remedialModal.questions.forEach((q) => {
-      const qText = `${q.no}. ${q.text}`;
+    remedialModal.questions.forEach((q, idx) => {
+      const qText = `${idx + 1}. ${q.text}`;
       const lines = pdf.splitTextToSize(qText, 175);
       if (y + (lines.length * 6) + 15 > 280) {
         pdf.addPage();
@@ -1521,34 +1542,6 @@ Kembalikan HANYA array JSON murni tanpa markdown codeblock:
       pdf.text(lines, margin, y);
       y += (lines.length * 6) + 10;
     });
-
-    if (includeExplanationsInExport) {
-      pdf.addPage();
-      y = margin;
-      pdf.setFontSize(13);
-      pdf.setFont('helvetica', 'bold');
-      pdf.text(`KUNCI JAWABAN & PEMBAHASAN (${remedialModal.remedialTitle})`, margin, y);
-      y += 10;
-
-      remedialModal.questions.forEach((q) => {
-        pdf.setFontSize(10);
-        pdf.setFont('helvetica', 'bold');
-        pdf.setTextColor(40, 50, 150);
-        pdf.text(`Nomor ${q.no}: Kunci [${q.answerKey}]`, margin, y);
-        y += 6;
-
-        pdf.setFont('helvetica', 'normal');
-        pdf.setTextColor(60, 60, 60);
-        const expLines = pdf.splitTextToSize(`Pembahasan: ${q.explanation || '-'}`, 175);
-        if (y + (expLines.length * 5) + 8 > 280) {
-          pdf.addPage();
-          y = margin;
-        }
-        pdf.text(expLines, margin, y);
-        y += (expLines.length * 5) + 6;
-      });
-      pdf.setTextColor(0, 0, 0);
-    }
 
     pdf.save(`${remedialModal.remedialTitle}.pdf`);
   };
@@ -1563,44 +1556,20 @@ Kembalikan HANYA array JSON murni tanpa markdown codeblock:
       }),
       new Paragraph({
         children: [
-          new TextRun({ text: `Nama Siswa: ${remedialModal.studentName}   |   Tanggal: ${formatDateIndo(remedialModal.examDate || todayKey)}`, italics: true, size: 20 })
+          new TextRun({ text: `Nama Siswa: ${remedialModal.studentName || '-'}   |   Tanggal: ${formatDateIndo(remedialModal.examDate || todayKey)}`, italics: true, size: 20 })
         ]
       }),
       new Paragraph({ text: '' }),
-      ...remedialModal.questions.map((q) => [
+      ...remedialModal.questions.map((q, idx) => [
         new Paragraph({
           children: [
-            new TextRun({ text: `${q.no}. ${q.text}`, size: 22, bold: true })
+            new TextRun({ text: `${idx + 1}. ${q.text}`, size: 22, bold: true })
           ]
         }),
         new Paragraph({ text: '' }),
         new Paragraph({ text: '' }),
       ]).flat()
     ];
-
-    if (includeExplanationsInExport) {
-      docChildren.push(
-        new Paragraph({ text: '' }),
-        new Paragraph({
-          text: '--- KUNCI JAWABAN & PEMBAHASAN ---',
-          heading: HeadingLevel.HEADING_2
-        }),
-        ...remedialModal.questions.map((q) => [
-          new Paragraph({
-            children: [
-              new TextRun({ text: `Nomor ${q.no}: `, bold: true }),
-              new TextRun({ text: `Kunci Jawaban: ${q.answerKey}`, color: '2040AA', bold: true })
-            ]
-          }),
-          new Paragraph({
-            children: [
-              new TextRun({ text: `Pembahasan: ${q.explanation || '-'}`, italics: true })
-            ]
-          }),
-          new Paragraph({ text: '' })
-        ]).flat()
-      );
-    }
 
     const doc = new Document({
       sections: [{ children: docChildren }]
@@ -1724,7 +1693,6 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
     }
   };
 
-  // Perhitungan Kalender
   const daysInCalMonth = new Date(calYear, calMonthIdx + 1, 0).getDate();
   const calendarDays = Array.from({ length: daysInCalMonth }, (_, i) => i + 1);
   const firstDayOfWeek = new Date(calYear, calMonthIdx, 1).getDay();
@@ -1937,7 +1905,7 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
           </div>
         )}
 
-        {/* TAB 2: BANK SOAL (DENGAN INPUT TANGGAL SOAL) */}
+        {/* TAB 2: BANK SOAL */}
         {activeTab === 'exams' && (
           <div className="space-y-4">
             <div className="bg-white rounded-2xl border p-6 flex flex-wrap justify-between items-center gap-4 shadow-sm">
@@ -1948,7 +1916,6 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
                 </p>
               </div>
 
-              {/* INPUT TANGGAL SOAL & TOMBOL UPLOAD */}
               <div className="flex flex-wrap items-center gap-3">
                 <div className="flex items-center gap-2 bg-slate-50 px-3 py-1.5 rounded-xl border">
                   <CalendarIcon className="w-4 h-4 text-indigo-600" />
@@ -2038,7 +2005,7 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
           </div>
         )}
 
-        {/* TAB 3: SCAN KOREKSI AI VISION (DENGAN PILIHAN TANGGAL PENGERJAAN & PAKET ACUAN OPSIONAL) */}
+        {/* TAB 3: SCAN KOREKSI AI VISION */}
         {activeTab === 'scanner' && (
           <div className="max-w-3xl mx-auto space-y-6">
             <div className="bg-white rounded-2xl border p-6 shadow-sm space-y-5">
@@ -2051,7 +2018,6 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
                 </p>
               </div>
 
-              {/* 4 Panduan Aturan Warna */}
               <div className="grid sm:grid-cols-2 gap-2.5 text-xs bg-slate-50 p-4 rounded-xl border">
                 <div className="flex items-start gap-2">
                   <span className="w-2.5 h-2.5 rounded-full bg-rose-500 mt-1 shrink-0"></span>
@@ -2083,7 +2049,6 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
                 </div>
               </div>
 
-              {/* FORM SELEKSI: SISWA, PAKET SOAL OPSIONAL, & TANGGAL PENGERJAAN */}
               <div className="grid sm:grid-cols-3 gap-3">
                 <div>
                   <label className="block text-xs font-bold text-slate-700 mb-1.5">Pilih Siswa</label>
@@ -2140,7 +2105,6 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
               </label>
             </div>
 
-            {/* HASIL DETEKSI AI VISION DENGAN DETAIL PER NOMOR */}
             {lastScanResult && (
               <div className="bg-white rounded-2xl border p-6 shadow-sm space-y-5">
                 <div className="flex flex-wrap items-center justify-between gap-3 border-b pb-4">
@@ -2161,7 +2125,6 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
                   </div>
                 </div>
 
-                {/* Ringkasan Status Butir Soal */}
                 <div className="space-y-3">
                   <h4 className="font-bold text-xs uppercase tracking-wider text-slate-600 flex items-center gap-1.5">
                     <FileCheck className="w-4 h-4 text-indigo-600" /> Hasil Verifikasi Status Per Nomor ({(lastScanResult.submission.results || []).length} butir):
@@ -2210,7 +2173,6 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
                   </div>
                 </div>
 
-                {/* Tombol Regenerate Soal Salah (Remedial) */}
                 {lastScanResult.wrongQuestionsList && lastScanResult.wrongQuestionsList.length > 0 ? (
                   <div className="p-4 rounded-xl bg-amber-50 border border-amber-200 flex flex-wrap items-center justify-between gap-3">
                     <div>
@@ -2218,7 +2180,7 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
                         <AlertCircle className="w-4 h-4 text-amber-600" /> Terdapat {lastScanResult.wrongQuestionsList.length} Soal Perlu Diulang
                       </h4>
                       <p className="text-xs text-amber-700 mt-0.5">
-                        AI dapat membuatkan paket soal latihan remedial yang setara/sejenis secara otomatis beserta kunci & pembahasannya.
+                        AI dapat membuatkan paket soal pembetulan yang setara secara otomatis.
                       </p>
                     </div>
                     <button
@@ -2239,9 +2201,7 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
           </div>
         )}
 
-        {/* ============================================================== */}
-        {/* TAB 4: KALENDER SINKRONISASI (HADIR, BANK SOAL, JAWABAN TERUPLOAD) */}
-        {/* ============================================================== */}
+        {/* TAB 4: KALENDER SINKRONISASI */}
         {activeTab === 'calendar' && (
           <div className="space-y-6">
             <div className="bg-white rounded-2xl border p-6 shadow-sm space-y-4">
@@ -2260,7 +2220,6 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
                   </div>
                 </div>
 
-                {/* Navigasi Bulan Kalender */}
                 <div className="flex items-center gap-1.5 bg-slate-50 p-1.5 rounded-xl border">
                   <button
                     onClick={() => {
@@ -2303,7 +2262,6 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
                 </div>
               </div>
 
-              {/* Grid Nama Hari */}
               <div className="grid grid-cols-7 gap-2 text-center text-xs font-bold text-slate-500 py-1">
                 {DAYS_ID.map((d, i) => (
                   <div key={d} className={`py-1 ${i === 0 ? 'text-rose-500' : ''}`}>
@@ -2312,7 +2270,6 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
                 ))}
               </div>
 
-              {/* Grid Tanggal Kalender */}
               <div className="grid grid-cols-7 gap-2">
                 {Array.from({ length: firstDayOfWeek }).map((_, i) => (
                   <div key={`empty-${i}`} className="min-h-[105px] rounded-xl bg-slate-50/40 border border-dashed border-slate-200/60 opacity-40"></div>
@@ -2408,7 +2365,6 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
               </div>
             </div>
 
-            {/* PANEL DETAIL TANGGAL TERPILIH */}
             {selectedCalDate && (() => {
               const dKey = selectedCalDate;
               const summary = getDailyCalendarSummary(
@@ -2785,7 +2741,7 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
           </div>
         )}
 
-        {/* TAB 6: ABSENSI HARIAN (TOMBOL SIMPAN & WA TERPISAH) */}
+        {/* TAB 6: ABSENSI HARIAN */}
         {activeTab === 'attendance' && (
           <div className="bg-white rounded-2xl border p-6 shadow-sm space-y-4">
             <div className="flex flex-wrap justify-between items-center gap-2 border-b pb-3">
@@ -3083,7 +3039,7 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
         </div>
       )}
 
-      {/* MODAL EDIT SOAL KHUSUS PENGAJAR (DENGAN EDIT TANGGAL SOAL) */}
+      {/* MODAL EDIT SOAL KHUSUS PENGAJAR */}
       {editingExamModal && (
         <div className="fixed inset-0 bg-slate-900/50 z-50 flex items-center justify-center p-4">
           <form onSubmit={handleSaveEditedExam} className="bg-white rounded-2xl max-w-2xl w-full p-6 space-y-4 shadow-xl max-h-[90vh] flex flex-col">
@@ -3166,83 +3122,42 @@ Buat laporan dalam bahasa Indonesia yang ramah, sopan, mendidik, dan terstruktur
       {remedialModal && (
         <div className="fixed inset-0 bg-slate-900/50 z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl max-w-2xl w-full p-6 space-y-4 shadow-xl max-h-[90vh] flex flex-col">
-            <div className="flex justify-between items-start border-b pb-3">
-              <div>
-                <span className="text-[11px] font-bold text-amber-700 bg-amber-50 px-2.5 py-0.5 rounded-md border border-amber-200">
-                  Paket Soal Pembetulan (Remedial AI)
+            <div className="flex justify-between items-start border-b pb-3 gap-3">
+              <div className="space-y-1 flex-1">
+                <span className="text-[11px] font-bold text-amber-700 bg-amber-50 px-2.5 py-0.5 rounded-md border border-amber-200 inline-block">
+                  Paket Soal Pembetulan
                 </span>
-                <h3 className="font-bold text-base text-slate-900 mt-1">{remedialModal.remedialTitle}</h3>
-                <p className="text-xs text-slate-500">
-                  Siswa: {remedialModal.studentName} • Tanggal Soal: {formatDateIndo(remedialModal.examDate)}
-                </p>
+                <h3 className="font-bold text-base text-slate-900">{remedialModal.remedialTitle}</h3>
+                <div className="flex flex-wrap items-center gap-2 text-xs text-slate-600 pt-1">
+                  <label className="font-bold text-slate-700">Nama Siswa:</label>
+                  <input
+                    type="text"
+                    value={remedialModal.studentName}
+                    onChange={(e) => setRemedialModal({ ...remedialModal, studentName: e.target.value })}
+                    className="px-2.5 py-1 border border-slate-300 rounded-lg bg-white text-xs font-semibold text-slate-900 focus:outline-none focus:border-indigo-600"
+                  />
+                  <span className="text-slate-500">• Tanggal Soal: {formatDateIndo(remedialModal.examDate)}</span>
+                </div>
               </div>
               <button onClick={() => setRemedialModal(null)}><X className="w-4 h-4" /></button>
             </div>
 
-            <div className="overflow-y-auto space-y-4 flex-1 text-xs pr-1">
-              <div className="space-y-3">
-                {remedialModal.questions.map((q, idx) => (
-                  <div key={idx} className="p-4 rounded-xl border bg-slate-50 space-y-2">
-                    <div className="flex justify-between items-center">
-                      <span className="font-bold text-indigo-700">Soal Remedial #{q.no} ({q.topic || 'Materi'})</span>
-                    </div>
-                    <div>
-                      <label className="block text-[11px] font-semibold text-slate-600 mb-1">Pertanyaan Soal Baru (Setara):</label>
-                      <textarea
-                        rows="2"
-                        value={q.text}
-                        onChange={(e) => {
-                          const updated = [...remedialModal.questions];
-                          updated[idx] = { ...updated[idx], text: e.target.value };
-                          setRemedialModal({ ...remedialModal, questions: updated });
-                        }}
-                        className="w-full p-2 border rounded-lg bg-white"
-                      />
-                    </div>
-                    <div className="grid sm:grid-cols-2 gap-2">
-                      <div>
-                        <label className="block text-[11px] font-semibold text-slate-600 mb-1">Kunci Jawaban:</label>
-                        <input
-                          type="text"
-                          value={q.answerKey}
-                          onChange={(e) => {
-                            const updated = [...remedialModal.questions];
-                            updated[idx] = { ...updated[idx], answerKey: e.target.value };
-                            setRemedialModal({ ...remedialModal, questions: updated });
-                          }}
-                          className="w-full px-2.5 py-1.5 border rounded-lg bg-white font-semibold text-indigo-800"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-[11px] font-semibold text-slate-600 mb-1">Pembahasan Langkah:</label>
-                        <input
-                          type="text"
-                          value={q.explanation || ''}
-                          onChange={(e) => {
-                            const updated = [...remedialModal.questions];
-                            updated[idx] = { ...updated[idx], explanation: e.target.value };
-                            setRemedialModal({ ...remedialModal, questions: updated });
-                          }}
-                          className="w-full px-2.5 py-1.5 border rounded-lg bg-white text-slate-700"
-                        />
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-
-              <div className="p-3 rounded-xl bg-indigo-50/50 border border-indigo-100 flex items-center gap-2">
-                <input
-                  type="checkbox"
-                  id="includeExp"
-                  checked={includeExplanationsInExport}
-                  onChange={(e) => setIncludeExplanationsInExport(e.target.checked)}
-                  className="rounded text-indigo-600 focus:ring-indigo-500"
-                />
-                <label htmlFor="includeExp" className="text-xs font-semibold text-slate-700 cursor-pointer">
-                  Sertakan Halaman Kunci Jawaban & Pembahasan pada dokumen unduhan
-                </label>
-              </div>
+            <div className="overflow-y-auto space-y-3 flex-1 text-xs pr-1">
+              {remedialModal.questions.map((q, idx) => (
+                <div key={idx} className="p-4 rounded-xl border bg-slate-50 space-y-1.5">
+                  <label className="block font-bold text-indigo-700">Soal #{idx + 1}</label>
+                  <textarea
+                    rows="2"
+                    value={q.text}
+                    onChange={(e) => {
+                      const updated = [...remedialModal.questions];
+                      updated[idx] = { ...updated[idx], text: e.target.value };
+                      setRemedialModal({ ...remedialModal, questions: updated });
+                    }}
+                    className="w-full p-2.5 border rounded-lg bg-white text-slate-800"
+                  />
+                </div>
+              ))}
             </div>
 
             <div className="flex flex-wrap justify-between items-center gap-2 border-t pt-3">
